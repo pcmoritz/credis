@@ -1,0 +1,12 @@
+{
+    "service": {
+        "name": "redis",
+        "port": 6379,
+        "check": {
+            "id": "redis",
+            "name": "redis",
+            "tcp": "localhost:6379",
+            "interval": "2s"
+        }
+    }
+}
