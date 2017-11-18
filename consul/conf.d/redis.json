@@ -8,5 +8,12 @@
             "tcp": "localhost:6379",
             "interval": "2s"
         }
-    }
+    },
+    "watches": [
+        {
+            "type": "checks",
+            "state": "critical",
+            "args": ["/home/ubuntu/redis-chain/redis/src/redis-server"]
+        }
+    ]
 }
