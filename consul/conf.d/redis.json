@@ -13,7 +13,7 @@
         {
             "type": "checks",
             "state": "critical",
-            "args": ["/home/ubuntu/redis-chain/redis/src/redis-server"]
+            "args": ["/Users/pcmoritz/redis-chain/redis/src/redis-server"]
         }
     ]
 }

@@ -13,7 +13,7 @@ Set up a consul cluster:
 Run the following on each machine, with a unique <node-name> and the <node-ip> of that node:
 
 ```
-consul agent -server -bootstrap-expect=3 -data-dir=/tmp/consul -node=<node-name> -bind=<node-ip> -enable-script-checks=true -config-dir=.
+consul agent -server -bootstrap-expect=3 -data-dir=/tmp/consul -node=<node-name> -bind=<node-ip> -enable-script-checks=true -config-dir=./consul/conf.d/redis.json
 ```
 
 Then run this command on one of the machines with the list of IP addresses of nodes in the cluster:
@@ -21,3 +21,15 @@ Then run this command on one of the machines with the list of IP addresses of no
 ```
 ./consul join <node-ip> <node-ip> <node-ip> <node-ip>
 ```
+
+curl localhost:8500/v1/agent/services
+
+curl localhost:8500/v1/health/service/redis?passing
+
+```
+cmake -DCMAKE_USE_OPENSSL=off ..
+```
+
+git submodule update --init --recursive
+
+sudo apt-get install libssh2-1-dev
