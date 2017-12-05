@@ -80,13 +80,9 @@ class RedisChainModule {
     }
   }
 
-  void set_role(ChainRole chain_role) {
-    chain_role_ = chain_role;
-  }
+  void set_role(ChainRole chain_role) { chain_role_ = chain_role; }
 
-  ChainRole get_role() {
-    return chain_role_;
-  }
+  ChainRole get_role() { return chain_role_; }
 
   std::string prev_address() { return prev_address_; }
 
@@ -96,9 +92,7 @@ class RedisChainModule {
 
   std::string next_port() { return next_port_; }
 
-  int64_t sn() {
-    return sn_;
-  }
+  int64_t sn() { return sn_; }
 
   int64_t next_sn() {
     std::cout << "sequence number is " << sn_ << std::endl;
@@ -183,8 +177,7 @@ int MemberSetRole_RedisCommand(RedisModuleCtx* ctx,
     next_port = module.next_port();
   }
 
-  module.Reset(prev_address, prev_port,
-               next_address, next_port);
+  module.Reset(prev_address, prev_port, next_address, next_port);
 
   if (module.child()) {
     aeEventLoop* loop = getEventLoop();
@@ -198,7 +191,8 @@ int MemberSetRole_RedisCommand(RedisModuleCtx* ctx,
 
   int64_t first_sn = std::stoi(ReadString(argv[6]));
 
-  for(auto i = module.sn_to_key().find(first_sn); i != module.sn_to_key().end(); ++i) {
+  for (auto i = module.sn_to_key().find(first_sn);
+       i != module.sn_to_key().end(); ++i) {
     std::string sn = std::to_string(i->first);
     std::string key = i->second;
     KeyReader reader(ctx, key);
@@ -210,8 +204,8 @@ int MemberSetRole_RedisCommand(RedisModuleCtx* ctx,
     freeReplyObject(reply);
   }
 
-  std::cout << "Called SET_ROLE with role " << module.get_role() << " and addresses "
-            << prev_address << ":" << prev_port << " and "
+  std::cout << "Called SET_ROLE with role " << module.get_role()
+            << " and addresses " << prev_address << ":" << prev_port << " and "
             << next_address << ":" << next_port << std::endl;
 
   RedisModule_ReplyWithLongLong(ctx, module.sn());
@@ -318,12 +312,13 @@ int MemberAck_RedisCommand(RedisModuleCtx* ctx,
     return RedisModule_WrongArity(ctx);
   }
   std::string sn = ReadString(argv[1]);
-  std::cout << "Erasing sequence number " << sn << " from sent list" << std::endl;
+  std::cout << "Erasing sequence number " << sn << " from sent list"
+            << std::endl;
   module.sent().erase(std::stoi(sn));
   if (module.parent()) {
     std::cout << "Propagating the ACK up the chain" << std::endl;
-    redisReply* reply = reinterpret_cast<redisReply*>(
-        redisAsyncCommand(module.parent(), NULL, NULL, "MEMBER.ACK %b", sn.data(), sn.size()));
+    redisReply* reply = reinterpret_cast<redisReply*>(redisAsyncCommand(
+        module.parent(), NULL, NULL, "MEMBER.ACK %b", sn.data(), sn.size()));
     freeReplyObject(reply);
   }
   RedisModule_ReplyWithNull(ctx);
@@ -360,9 +355,8 @@ int RedisModule_OnLoad(RedisModuleCtx* ctx,
                                 1) == REDISMODULE_ERR)
     return REDISMODULE_ERR;
 
-  if (RedisModule_CreateCommand(ctx, "MEMBER.ACK",
-                                MemberAck_RedisCommand, "write", 1, 1,
-                                1) == REDISMODULE_ERR)
+  if (RedisModule_CreateCommand(ctx, "MEMBER.ACK", MemberAck_RedisCommand,
+                                "write", 1, 1, 1) == REDISMODULE_ERR)
     return REDISMODULE_ERR;
 
   return REDISMODULE_OK;

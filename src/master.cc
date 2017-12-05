@@ -51,8 +51,7 @@ long long SetRole(redisContext* context,
   redisReply* reply = reinterpret_cast<redisReply*>(
       redisCommand(context, "MEMBER.SET_ROLE %s %s %s %s %s %s", role.c_str(),
                    prev_address.c_str(), prev_port.c_str(),
-                   next_address.c_str(), next_port.c_str(),
-                   sn_string.c_str()));
+                   next_address.c_str(), next_port.c_str(), sn_string.c_str()));
   std::cout << "Last sequence number is " << reply->integer << std::endl;
   long long sn_result = reply->integer;
   freeReplyObject(reply);
@@ -134,7 +133,7 @@ int MasterRemove_RedisCommand(RedisModuleCtx* ctx,
 
   if (index == members.size() - 1) {
     std::cout << "Removing the tail." << std::endl;
-    SetRole(members[index-1].context, "tail", "nil", "nil",
+    SetRole(members[index - 1].context, "tail", "nil", "nil",
             members[0].address, members[0].port);
   }
 
@@ -142,16 +141,17 @@ int MasterRemove_RedisCommand(RedisModuleCtx* ctx,
 
   if (index == 0) {
     std::cout << "Removing the head." << std::endl;
-    SetRole(members[0].context, "head", "nil", "nil",
-            members[1].address, members[1].port);
+    SetRole(members[0].context, "head", "nil", "nil", members[1].address,
+            members[1].port);
   }
 
   if (index != 0 && index != members.size()) {
     std::cout << "Removing the middle node " << index << "." << std::endl;
-    long long sn = SetRole(members[index].context, "",
-                           members[index-1].address, members[index-1].port, "", "");
-    SetRole(members[index-1].context, "", "", "",
-            members[index].address, members[index].port, sn);
+    long long sn =
+        SetRole(members[index].context, "", members[index - 1].address,
+                members[index - 1].port, "", "");
+    SetRole(members[index - 1].context, "", "", "", members[index].address,
+            members[index].port, sn);
   }
 
   RedisModule_ReplyWithNull(ctx);
@@ -175,9 +175,9 @@ int RedisModule_OnLoad(RedisModuleCtx* ctx,
                                 "write", 1, 1, 1) == REDISMODULE_ERR)
     return REDISMODULE_ERR;
 
-    if (RedisModule_CreateCommand(ctx, "MASTER.REMOVE", MasterRemove_RedisCommand,
-                                  "write", 1, 1, 1) == REDISMODULE_ERR)
-      return REDISMODULE_ERR;
+  if (RedisModule_CreateCommand(ctx, "MASTER.REMOVE", MasterRemove_RedisCommand,
+                                "write", 1, 1, 1) == REDISMODULE_ERR)
+    return REDISMODULE_ERR;
 
   return REDISMODULE_OK;
 }
