@@ -46,10 +46,14 @@ redisAsyncContext* AsyncConnect(const std::string& address, int port) {
 
 class RedisChainModule {
  public:
-  enum ChainRole : int { HEAD = 0, MIDDLE = 1, TAIL = 2 };
+  enum class ChainRole : int {
+    kHead = 0,
+    kMiddle = 1,
+    kTail = 2,
+  };
 
   RedisChainModule()
-      : chain_role_(ChainRole::HEAD), parent_(NULL), child_(NULL) {}
+      : chain_role_(ChainRole::kHead), parent_(NULL), child_(NULL) {}
 
   ~RedisChainModule() {
     if (child_) {
@@ -85,7 +89,12 @@ class RedisChainModule {
   }
 
   void set_role(ChainRole chain_role) { chain_role_ = chain_role; }
-  ChainRole chain_role() { return chain_role_; }
+  ChainRole chain_role() const { return chain_role_; }
+  constexpr const char* ChainRoleName() const {
+    return chain_role() == ChainRole::kHead
+               ? "HEAD"
+               : (chain_role() == ChainRole::kMiddle ? "MIDDLE" : "TAIL");
+  }
 
   std::string prev_address() { return prev_address_; }
   std::string prev_port() { return prev_port_; }
@@ -100,7 +109,7 @@ class RedisChainModule {
   std::map<int64_t, std::string>& sn_to_key() { return sn_to_key_; }
   int64_t sn() const { return sn_; }
   int64_t inc_sn() {
-    // TODO(zongheng): check ME == HEAD.
+    // TODO(zongheng): check ME == kHead.
     std::cout << "Using sequence number " << sn_ + 1 << std::endl;
     return ++sn_;
   }
@@ -161,11 +170,11 @@ int MemberSetRole_RedisCommand(RedisModuleCtx* ctx,
   }
   std::string role = ReadString(argv[1]);
   if (role == "head") {
-    module.set_role(RedisChainModule::ChainRole::HEAD);
+    module.set_role(RedisChainModule::ChainRole::kHead);
   } else if (role == "middle") {
-    module.set_role(RedisChainModule::ChainRole::MIDDLE);
+    module.set_role(RedisChainModule::ChainRole::kMiddle);
   } else if (role == "tail") {
-    module.set_role(RedisChainModule::ChainRole::TAIL);
+    module.set_role(RedisChainModule::ChainRole::kTail);
   } else {
     assert(role == "");
   }
@@ -214,7 +223,7 @@ int MemberSetRole_RedisCommand(RedisModuleCtx* ctx,
     freeReplyObject(reply);
   }
 
-  std::cout << "Called SET_ROLE with role " << module.chain_role()
+  std::cout << "Called SET_ROLE with role " << module.ChainRoleName()
             << " and addresses " << prev_address << ":" << prev_port << " and "
             << next_address << ":" << next_port << std::endl;
 
@@ -243,7 +252,7 @@ int Put(RedisModuleCtx* ctx,
   std::string seqnum = std::to_string(sn);
   std::string k = ReadString(name);
   module.record_update(sn, k);
-  if (module.chain_role() == RedisChainModule::TAIL) {
+  if (module.chain_role() == RedisChainModule::ChainRole::kTail) {
     RedisModuleCallReply* reply =
         RedisModule_Call(ctx, "PUBLISH", "cc", "answers", seqnum.c_str());
     if (RedisModule_CallReplyType(reply) == REDISMODULE_REPLY_ERROR) {
@@ -276,7 +285,7 @@ int MemberPut_RedisCommand(RedisModuleCtx* ctx,
   if (argc != 3) {
     return RedisModule_WrongArity(ctx);
   }
-  if (module.chain_role() == RedisChainModule::HEAD) {
+  if (module.chain_role() == RedisChainModule::ChainRole::kHead) {
     long long sn = module.inc_sn();
     return Put(ctx, argv[1], argv[2], sn);
   } else {
@@ -359,7 +368,7 @@ int TailCheckpoint_RedisCommand(RedisModuleCtx* ctx,
   if (argc != 1) {  // No arg needed.
     return RedisModule_WrongArity(ctx);
   }
-  if (module.chain_role() != RedisChainModule::ChainRole::TAIL) {
+  if (module.chain_role() != RedisChainModule::ChainRole::kTail) {
     return RedisModule_ReplyWithError(
         ctx, "ERR this command must be called on the tail.");
   }
