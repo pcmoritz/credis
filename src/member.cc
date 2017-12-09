@@ -1,14 +1,14 @@
 #include <assert.h>
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <ctype.h>
 #include <string.h>
 
 extern "C" {
-#include "redismodule.h"
-#include "hiredis/hiredis.h"
-#include "hiredis/async.h"
 #include "hiredis/adapters/ae.h"
+#include "hiredis/async.h"
+#include "hiredis/hiredis.h"
+#include "redismodule.h"
 }
 
 extern "C" {
@@ -16,12 +16,15 @@ extern "C" {
 }
 
 #include <iostream>
+#include <map>
 #include <set>
 #include <string>
-#include <map>
 #include <vector>
 
 #include "utils.h"
+
+// Unused argument.
+#define UNUSED_ARG(V) ((void) V)
 
 extern "C" {
 aeEventLoop* getEventLoop();
@@ -45,7 +48,8 @@ class RedisChainModule {
  public:
   enum ChainRole : int { HEAD = 0, MIDDLE = 1, TAIL = 2 };
 
-  RedisChainModule() : chain_role_(ChainRole::HEAD), sn_(0), child_(NULL) {}
+  RedisChainModule()
+      : chain_role_(ChainRole::HEAD), parent_(NULL), child_(NULL) {}
 
   ~RedisChainModule() {
     if (child_) {
@@ -81,53 +85,59 @@ class RedisChainModule {
   }
 
   void set_role(ChainRole chain_role) { chain_role_ = chain_role; }
-
-  ChainRole get_role() { return chain_role_; }
-
-  std::string prev_address() { return prev_address_; }
-
-  std::string prev_port() { return prev_port_; }
-
-  std::string next_address() { return next_address_; }
-
-  std::string next_port() { return next_port_; }
-
-  int64_t sn() { return sn_; }
-
-  int64_t next_sn() {
-    std::cout << "sequence number is " << sn_ << std::endl;
-    return sn_++;
-  }
-
   ChainRole chain_role() { return chain_role_; }
 
+  std::string prev_address() { return prev_address_; }
+  std::string prev_port() { return prev_port_; }
+  std::string next_address() { return next_address_; }
+  std::string next_port() { return next_port_; }
   redisAsyncContext* child() { return child_; }
-
   redisAsyncContext* parent() { return parent_; }
 
-  void Put(int64_t sn, const std::string& key) {
+  std::set<int64_t>& sent() { return sent_; }
+
+  // Sequence numbers.
+  std::map<int64_t, std::string>& sn_to_key() { return sn_to_key_; }
+  int64_t sn() const { return sn_; }
+  int64_t inc_sn() {
+    // TODO(zongheng): check ME == HEAD.
+    std::cout << "Using sequence number " << sn_ + 1 << std::endl;
+    return ++sn_;
+  }
+  void record_sn(int64_t sn) { sn_ = std::max(sn_, sn); }
+
+  void record_update(int64_t sn, const std::string& key) {
     std::cout << "added sequence number " << sn << std::endl;
     sn_to_key_[sn] = key;
   }
 
-  std::set<int64_t>& sent() { return sent_; }
-
-  std::map<int64_t, std::string>& sn_to_key() { return sn_to_key_; }
+  // TODO(zongheng): this field should be picked up from the ckpt file, instead
+  // of being cached.
+  int64_t sn_ckpt() const { return sn_ckpt_; }
+  void set_sn_ckpt(int64_t sn) { sn_ckpt_ = sn; }
 
  private:
   std::string prev_address_;
   std::string prev_port_;
   std::string next_address_;
   std::string next_port_;
+
   ChainRole chain_role_;
-  int64_t sn_;
-  // The next node in the chain (or NULL if none)
-  redisAsyncContext* child_;
   // The previous node in the chain (or NULL if none)
   redisAsyncContext* parent_;
-  // The sent list
+  // The next node in the chain (or NULL if none)
+  redisAsyncContext* child_;
+
+  // Largest sequence number seen so far.  Initialized to the special value -1,
+  // which indicates no updates have been processed yet.
+  int64_t sn_ = -1;
+  // Next sn to checkpoint.  The checkpointing algorithm is free to checkpoint
+  // the range [sn_ckpt_, sn_].
+  int64_t sn_ckpt_ = 0;
+
+  // The sent list.
   std::set<int64_t> sent_;
-  // For implementing flushing
+  // For implementing checkpointing.
   std::map<int64_t, std::string> sn_to_key_;
 };
 
@@ -204,7 +214,7 @@ int MemberSetRole_RedisCommand(RedisModuleCtx* ctx,
     freeReplyObject(reply);
   }
 
-  std::cout << "Called SET_ROLE with role " << module.get_role()
+  std::cout << "Called SET_ROLE with role " << module.chain_role()
             << " and addresses " << prev_address << ":" << prev_port << " and "
             << next_address << ":" << next_port << std::endl;
 
@@ -212,6 +222,15 @@ int MemberSetRole_RedisCommand(RedisModuleCtx* ctx,
   return REDISMODULE_OK;
 }
 
+// Helper function to handle updates locally.
+//
+// For all nodes: (1) actual update into redis, (1) update the internal
+// sn_to_key state.
+//
+// For non-tail nodes: propagate.
+//
+// For tail: publish that the request has been finalized, and ack up to the
+// chain.
 int Put(RedisModuleCtx* ctx,
         RedisModuleString* name,
         RedisModuleString* data,
@@ -221,24 +240,26 @@ int Put(RedisModuleCtx* ctx,
       RedisModule_OpenKey(ctx, name, REDISMODULE_WRITE));
   // TODO(pcm): error checking
   RedisModule_StringSet(key, data);
-  std::string rid = std::to_string(sn);
+  std::string seqnum = std::to_string(sn);
   std::string k = ReadString(name);
-  module.Put(sn, k);
+  module.record_update(sn, k);
   if (module.chain_role() == RedisChainModule::TAIL) {
     RedisModuleCallReply* reply =
-        RedisModule_Call(ctx, "PUBLISH", "cc", "answers", rid.c_str());
+        RedisModule_Call(ctx, "PUBLISH", "cc", "answers", seqnum.c_str());
     if (RedisModule_CallReplyType(reply) == REDISMODULE_REPLY_ERROR) {
       return RedisModule_ReplyWithCallReply(ctx, reply);
     }
-    reply = RedisModule_Call(ctx, "MEMBER.ACK", "c", rid.c_str());
+    reply = RedisModule_Call(ctx, "MEMBER.ACK", "c", seqnum.c_str());
     if (RedisModule_CallReplyType(reply) == REDISMODULE_REPLY_ERROR) {
       return RedisModule_ReplyWithCallReply(ctx, reply);
     }
   } else {
+    // TODO(zongheng): is the ordering of sent-list insertion & actual command
+    // launch important?
     std::string v = ReadString(data);
     redisReply* reply = reinterpret_cast<redisReply*>(redisAsyncCommand(
         module.child(), NULL, NULL, "MEMBER.PROPAGATE %b %b %b", k.data(),
-        k.size(), v.data(), v.size(), rid.data(), rid.size()));
+        k.size(), v.data(), v.size(), seqnum.data(), seqnum.size()));
     freeReplyObject(reply);
     module.sent().insert(sn);
   }
@@ -256,17 +277,17 @@ int MemberPut_RedisCommand(RedisModuleCtx* ctx,
     return RedisModule_WrongArity(ctx);
   }
   if (module.chain_role() == RedisChainModule::HEAD) {
-    long long sn = module.next_sn();
+    long long sn = module.inc_sn();
     return Put(ctx, argv[1], argv[2], sn);
   } else {
-    return RedisModule_ReplyWithError(ctx, "called PUT on non head node");
+    return RedisModule_ReplyWithError(ctx, "ERR called PUT on non-head node");
   }
 }
 
 // Propagate a put request down the chain
 // argv[1] is the key for the data
 // argv[2] is the data
-// argv[3] is the request ID
+// argv[3] is the sequence number for this update request
 int MemberPropagate_RedisCommand(RedisModuleCtx* ctx,
                                  RedisModuleString** argv,
                                  int argc) {
@@ -275,6 +296,7 @@ int MemberPropagate_RedisCommand(RedisModuleCtx* ctx,
   }
   long long sn;
   RedisModule_StringToLongLong(argv[3], &sn);
+  module.record_sn(static_cast<int64_t>(sn));
   return Put(ctx, argv[1], argv[2], sn);
 }
 
@@ -325,6 +347,69 @@ int MemberAck_RedisCommand(RedisModuleCtx* ctx,
   return REDISMODULE_OK;
 }
 
+// TAIL.CHECKPOINT: incrementally checkpoint in-memory entries to durable
+// storage.
+//
+// Returns the number of sequence numbers newly checkpointed.  Errors out if not
+// called on the tail.
+int TailCheckpoint_RedisCommand(RedisModuleCtx* ctx,
+                                RedisModuleString** argv,
+                                int argc) {
+  UNUSED_ARG(argv);
+  if (argc != 1) {  // No arg needed.
+    return RedisModule_WrongArity(ctx);
+  }
+  if (module.chain_role() != RedisChainModule::ChainRole::TAIL) {
+    return RedisModule_ReplyWithError(
+        ctx, "ERR this command must be called on the tail.");
+  }
+
+  // Fill in "redis key -> redis value".
+  std::vector<std::string> keys_to_write;
+  std::vector<std::string> vals_to_write;
+  const auto& sn_to_key = module.sn_to_key();
+  size_t size = 0;
+
+  // TODO(zongheng): the following checkpoints the range [sn_ckpt_, sn_], but
+  // any smaller chunk will do (and perhaps desirable, when we want to keep this
+  // redis command running < 1ms, say.)
+  const int64_t sn_latest = module.sn();
+  const int64_t sn_ckpt = module.sn_ckpt();
+  for (int64_t s = sn_ckpt; s <= sn_latest; ++s) {
+    auto i = sn_to_key.find(s);
+    if (i == sn_to_key.end()) {
+      std::cerr << "ERR the sn_to_key map doesn't contain seqnum " << s;
+      continue;
+    }
+    std::string key = i->second;
+    const KeyReader reader(ctx, key);
+    const char* value = reader.value(&size);
+
+    keys_to_write.push_back(key);
+    vals_to_write.emplace_back(std::string(value, size));
+  }
+
+  // TODO(zongheng): actually write this out.
+  // std::cout << "# entries to write: " << keys_to_write.size() << std::endl;
+
+  const int64_t checkpointed = sn_latest - sn_ckpt + 1;
+  module.set_sn_ckpt(sn_latest + 1);
+  return RedisModule_ReplyWithLongLong(ctx, checkpointed);
+}
+
+// MEMBER.SN: the largest SN processed by this node.
+//
+// For debugging.
+int MemberSn_RedisCommand(RedisModuleCtx* ctx,
+                          RedisModuleString** argv,
+                          int argc) {
+  UNUSED_ARG(argv);
+  if (argc != 1) {  // No arg needed.
+    return RedisModule_WrongArity(ctx);
+  }
+  return RedisModule_ReplyWithLongLong(ctx, module.sn());
+}
+
 extern "C" {
 
 int RedisModule_OnLoad(RedisModuleCtx* ctx,
@@ -333,31 +418,51 @@ int RedisModule_OnLoad(RedisModuleCtx* ctx,
   REDISMODULE_NOT_USED(argc);
   REDISMODULE_NOT_USED(argv);
   if (RedisModule_Init(ctx, "MEMBER", 1, REDISMODULE_APIVER_1) ==
-      REDISMODULE_ERR)
+      REDISMODULE_ERR) {
     return REDISMODULE_ERR;
-
+  }
   if (RedisModule_CreateCommand(ctx, "MEMBER.SET_ROLE",
                                 MemberSetRole_RedisCommand, "write", 1, 1,
-                                1) == REDISMODULE_ERR)
+                                1) == REDISMODULE_ERR) {
     return REDISMODULE_ERR;
+  }
 
   if (RedisModule_CreateCommand(ctx, "MEMBER.PUT", MemberPut_RedisCommand,
-                                "write", 1, 1, 1) == REDISMODULE_ERR)
+                                "write", 1, 1, 1) == REDISMODULE_ERR) {
     return REDISMODULE_ERR;
+  }
 
   if (RedisModule_CreateCommand(ctx, "MEMBER.PROPAGATE",
                                 MemberPropagate_RedisCommand, "write", 1, 1,
-                                1) == REDISMODULE_ERR)
+                                1) == REDISMODULE_ERR) {
     return REDISMODULE_ERR;
+  }
 
   if (RedisModule_CreateCommand(ctx, "MEMBER.REPLICATE",
                                 MemberReplicate_RedisCommand, "write", 1, 1,
-                                1) == REDISMODULE_ERR)
+                                1) == REDISMODULE_ERR) {
     return REDISMODULE_ERR;
+  }
 
   if (RedisModule_CreateCommand(ctx, "MEMBER.ACK", MemberAck_RedisCommand,
-                                "write", 1, 1, 1) == REDISMODULE_ERR)
+                                "write", 1, 1, 1) == REDISMODULE_ERR) {
     return REDISMODULE_ERR;
+  }
+
+  // A special command only runnable on the tail.
+  if (RedisModule_CreateCommand(
+          ctx, "TAIL.CHECKPOINT", TailCheckpoint_RedisCommand, "write",
+          /*firstkey=*/-1, /*lastkey=*/-1, /*keystep=*/0) == REDISMODULE_ERR) {
+    return REDISMODULE_ERR;
+  }
+
+  // Debugging only.
+  if (RedisModule_CreateCommand(ctx, "MEMBER.SN", MemberSn_RedisCommand,
+                                "readonly",
+                                /*firstkey=*/-1, /*lastkey=*/-1,
+                                /*keystep=*/0) == REDISMODULE_ERR) {
+    return REDISMODULE_ERR;
+  }
 
   return REDISMODULE_OK;
 }

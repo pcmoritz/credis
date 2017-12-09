@@ -9,7 +9,7 @@ std::string ReadString(RedisModuleString* str) {
 }
 
 // Helper class to read data from a key and handle closing the key
-// in an appropriate way
+// in an appropriate way.
 class KeyReader {
  public:
   KeyReader(RedisModuleCtx* ctx, const std::string& key) : ctx_(ctx) {
@@ -24,7 +24,7 @@ class KeyReader {
   const char* key(size_t* size) {
     return RedisModule_StringPtrLen(name_, size);
   }
-  const char* value(size_t* size) {
+  const char* value(size_t* size) const {
     return RedisModule_StringDMA(key_, size, REDISMODULE_READ);
   }
 
