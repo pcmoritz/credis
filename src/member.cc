@@ -1,8 +1,12 @@
 #include <assert.h>
 #include <ctype.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include <map>
+#include <set>
+#include <string>
+#include <vector>
 
 extern "C" {
 #include "hiredis/adapters/ae.h"
@@ -15,16 +19,9 @@ extern "C" {
 #include "redis/src/ae.h"
 }
 
-#include <iostream>
-#include <map>
-#include <set>
-#include <string>
-#include <vector>
+#include <glog/logging.h>
 
 #include "utils.h"
-
-// Unused argument.
-#define UNUSED_ARG(V) ((void) V)
 
 extern "C" {
 aeEventLoop* getEventLoop();
@@ -109,14 +106,15 @@ class RedisChainModule {
   std::map<int64_t, std::string>& sn_to_key() { return sn_to_key_; }
   int64_t sn() const { return sn_; }
   int64_t inc_sn() {
-    // TODO(zongheng): check ME == kHead.
-    std::cout << "Using sequence number " << sn_ + 1 << std::endl;
+    CHECK(chain_role_ == ChainRole::kHead)
+        << "Logical error?: only the head should increment the sn.";
+    LOG(INFO) << "Using sequence number " << sn_ + 1;
     return ++sn_;
   }
   void record_sn(int64_t sn) { sn_ = std::max(sn_, sn); }
 
   void record_update(int64_t sn, const std::string& key) {
-    std::cout << "added sequence number " << sn << std::endl;
+    LOG(INFO) << "added sequence number " << sn;
     sn_to_key_[sn] = key;
   }
 
@@ -223,9 +221,9 @@ int MemberSetRole_RedisCommand(RedisModuleCtx* ctx,
     freeReplyObject(reply);
   }
 
-  std::cout << "Called SET_ROLE with role " << module.ChainRoleName()
+  LOG(INFO) << "Called SET_ROLE with role " << module.ChainRoleName()
             << " and addresses " << prev_address << ":" << prev_port << " and "
-            << next_address << ":" << next_port << std::endl;
+            << next_address << ":" << next_port;
 
   RedisModule_ReplyWithLongLong(ctx, module.sn());
   return REDISMODULE_OK;
@@ -317,7 +315,7 @@ int MemberReplicate_RedisCommand(RedisModuleCtx* ctx,
   if (argc != 1) {
     return RedisModule_WrongArity(ctx);
   }
-  std::cout << "Called replicate." << std::endl;
+  LOG(INFO) << "Called replicate.";
   for (auto element : module.sn_to_key()) {
     KeyReader reader(ctx, element.second);
     size_t key_size, value_size;
@@ -328,7 +326,7 @@ int MemberReplicate_RedisCommand(RedisModuleCtx* ctx,
                           key_size, value_data, value_size));
     freeReplyObject(reply);
   }
-  std::cout << "Done replicating." << std::endl;
+  LOG(INFO) << "Done replicating.";
   RedisModule_ReplyWithNull(ctx);
   return REDISMODULE_OK;
 }
@@ -343,11 +341,10 @@ int MemberAck_RedisCommand(RedisModuleCtx* ctx,
     return RedisModule_WrongArity(ctx);
   }
   std::string sn = ReadString(argv[1]);
-  std::cout << "Erasing sequence number " << sn << " from sent list"
-            << std::endl;
+  LOG(INFO) << "Erasing sequence number " << sn << " from sent list";
   module.sent().erase(std::stoi(sn));
   if (module.parent()) {
-    std::cout << "Propagating the ACK up the chain" << std::endl;
+    LOG(INFO) << "Propagating the ACK up the chain";
     redisReply* reply = reinterpret_cast<redisReply*>(redisAsyncCommand(
         module.parent(), NULL, NULL, "MEMBER.ACK %b", sn.data(), sn.size()));
     freeReplyObject(reply);
@@ -364,7 +361,7 @@ int MemberAck_RedisCommand(RedisModuleCtx* ctx,
 int TailCheckpoint_RedisCommand(RedisModuleCtx* ctx,
                                 RedisModuleString** argv,
                                 int argc) {
-  UNUSED_ARG(argv);
+  REDISMODULE_NOT_USED(argv);
   if (argc != 1) {  // No arg needed.
     return RedisModule_WrongArity(ctx);
   }
@@ -386,10 +383,8 @@ int TailCheckpoint_RedisCommand(RedisModuleCtx* ctx,
   const int64_t sn_ckpt = module.sn_ckpt();
   for (int64_t s = sn_ckpt; s <= sn_latest; ++s) {
     auto i = sn_to_key.find(s);
-    if (i == sn_to_key.end()) {
-      std::cerr << "ERR the sn_to_key map doesn't contain seqnum " << s;
-      continue;
-    }
+    CHECK(i != sn_to_key.end())
+        << "ERR the sn_to_key map doesn't contain seqnum " << s;
     std::string key = i->second;
     const KeyReader reader(ctx, key);
     const char* value = reader.value(&size);
@@ -399,7 +394,7 @@ int TailCheckpoint_RedisCommand(RedisModuleCtx* ctx,
   }
 
   // TODO(zongheng): actually write this out.
-  // std::cout << "# entries to write: " << keys_to_write.size() << std::endl;
+  // LOG(INFO) << "# entries to write: " << keys_to_write.size() ;
 
   const int64_t checkpointed = sn_latest - sn_ckpt + 1;
   module.set_sn_ckpt(sn_latest + 1);
@@ -412,7 +407,7 @@ int TailCheckpoint_RedisCommand(RedisModuleCtx* ctx,
 int MemberSn_RedisCommand(RedisModuleCtx* ctx,
                           RedisModuleString** argv,
                           int argc) {
-  UNUSED_ARG(argv);
+  REDISMODULE_NOT_USED(argv);
   if (argc != 1) {  // No arg needed.
     return RedisModule_WrongArity(ctx);
   }

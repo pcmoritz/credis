@@ -1,3 +1,6 @@
 [submodule "redis"]
 	path = redis
 	url = https://github.com/pcmoritz/redis
+[submodule "glog"]
+	path = glog
+	url = https://github.com/google/glog

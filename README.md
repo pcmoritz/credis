@@ -7,6 +7,8 @@ git submodule init
 git submodule update
 
 pushd redis && make -j && popd
+pushd glog && cmake . && make -j install && popd
+
 mkdir build; cd build
 cmake ..
 make -j
