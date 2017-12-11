@@ -1,4 +1,4 @@
-BasedOnStyle: Chromium
+BasedOnStyle: Google
 ColumnLimit: 80
 DerivePointerAlignment: false
 IndentCaseLabels: false
