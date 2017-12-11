@@ -2,8 +2,9 @@ include_directories(${CMAKE_SOURCE_DIR})
 include_directories(${CMAKE_SOURCE_DIR}/redis/src/)
 include_directories(${CMAKE_SOURCE_DIR}/redis/deps/)
 
-find_package (glog 0.3.5 REQUIRED)
+find_package(glog 0.3.5 REQUIRED)
 find_package(LevelDB REQUIRED)
+include_directories(${LevelDB_INCLUDES})
 
 if(APPLE)
   set(REDIS_MODULE_CFLAGS -W -Wall -dynamic -fno-common -g -ggdb -std=c++11 -O2)

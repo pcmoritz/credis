@@ -8,7 +8,7 @@ git submodule update
 
 pushd redis && make -j && popd
 pushd glog && cmake . && make -j install && popd
-pushd leveldb && make -j && cp -r include/leveldb /usr/local/include/ && cp out-static/lib* out-shared/lib* /usr/local/lib && popd
+pushd leveldb && make -j && popd
 
 mkdir build; cd build
 cmake ..

@@ -1,4 +1,8 @@
-# Adapted from https://github.com/caffe2/caffe2/blob/master/cmake/Modules/FindLevelDB.cmake
+# Adapted from
+#     https://github.com/caffe2/caffe2/blob/master/cmake/Modules/FindLevelDB.cmake
+# Official CMake support for leveldb is being developed/tracked at:
+#     https://github.com/google/leveldb/issues/466
+#     https://github.com/pwnall/leveldb/tree/cmake
 
 # - Find LevelDB
 #
@@ -6,14 +10,16 @@
 #  LevelDB_LIBRARIES - List of libraries when using LevelDB.
 #  LevelDB_FOUND     - True if LevelDB found.
 
+set(LEVELDB_ROOT "${CMAKE_SOURCE_DIR}/leveldb")
+
 # Look for the header file.
 find_path(LevelDB_INCLUDE NAMES leveldb/db.h
-                          PATHS $ENV{LEVELDB_ROOT}/include /opt/local/include /usr/local/include /usr/include
+                          PATHS ${LEVELDB_ROOT}/include /opt/local/include /usr/local/include /usr/include
                           DOC "Path in which the file leveldb/db.h is located." )
 
 # Look for the library.
-find_library(LevelDB_LIBRARY NAMES libleveldb.a
-                             PATHS /usr/lib /usr/local/lib $ENV{LEVELDB_ROOT}/out-shared $ENV{LEVELDB_ROOT}/out-static
+find_library(LevelDB_LIBRARY NAMES leveldb
+                             PATHS ${LEVELDB_ROOT}/out-static ${LEVELDB_ROOT}/out-shared /usr/local/lib /usr/lib
                              DOC "Path to leveldb library." )
 
 include(FindPackageHandleStandardArgs)
