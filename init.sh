@@ -34,7 +34,7 @@ redis-cli -p 6381 list.checkpoint
 sleep 3
 redis-cli -p 6379 member.put k1 v1
 # (nil)
-redis-cli -p 6381 get a
+redis-cli -p 6381 get k1
 # "1"
 redis-cli -p 6381 tail.checkpoint
 # (integer) 1

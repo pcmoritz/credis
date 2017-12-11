@@ -27,7 +27,8 @@ extern "C" {
 #include "utils.h"
 
 // TODO(zongheng): don't hardcode.
-static constexpr const char* const kCheckpointPath = "/tmp/gcs_ckpt";
+const char* const kCheckpointPath = "/tmp/gcs_ckpt";
+const char* const kCheckpointHeaderKey = "";
 
 extern "C" {
 aeEventLoop* getEventLoop();
@@ -56,6 +57,31 @@ int HandleNonOk(RedisModuleCtx* ctx, leveldb::Status s) {
   LOG(ERROR) << s.ToString();
   RedisModule_ReplyWithSimpleString(ctx, "ERR");
   return REDISMODULE_ERR;
+}
+
+// We store the sn_ckpt watermark in a special header entry in the checkpoint
+// DB, keyed by kCheckpointHeaderKey.  In the future, the value of this entry
+// can contain other metadata.
+leveldb::Status SetCheckpointWatermark(leveldb::DB* ckpt, int64_t sn_ckpt) {
+  leveldb::Slice val(reinterpret_cast<char*>(&sn_ckpt), sizeof(int64_t));
+  return ckpt->Put(leveldb::WriteOptions(), kCheckpointHeaderKey, val);
+}
+leveldb::Status LookupCheckpointWatermark(leveldb::DB* ckpt, int64_t* sn_ckpt) {
+  std::string value;
+  leveldb::Status s =
+      ckpt->Get(leveldb::ReadOptions(), kCheckpointHeaderKey, &value);
+
+  if (!s.ok() && !s.IsNotFound()) {
+    return s;
+  }
+  if (s.IsNotFound()) {
+    *sn_ckpt = 0;  // No checkpointed data yet.
+  } else {
+    const int64_t tmp = *reinterpret_cast<const int64_t*>(value.data());
+    CHECK(tmp >= 0) << "Corrupted data, endianness?";
+    *sn_ckpt = tmp;
+  }
+  return leveldb::Status::OK();
 }
 
 }  // namespace
@@ -143,11 +169,6 @@ class RedisChainModule {
     sn_to_key_[sn] = key;
   }
 
-  // TODO(zongheng): this field should be picked up from the ckpt file, instead
-  // of being cached.
-  int64_t sn_ckpt() const { return sn_ckpt_; }
-  void set_sn_ckpt(int64_t sn) { sn_ckpt_ = sn; }
-
  private:
   std::string prev_address_;
   std::string prev_port_;
@@ -163,9 +184,6 @@ class RedisChainModule {
   // Largest sequence number seen so far.  Initialized to the special value -1,
   // which indicates no updates have been processed yet.
   int64_t sn_ = -1;
-  // Next sn to checkpoint.  The checkpointing algorithm is free to checkpoint
-  // the range [sn_ckpt_, sn_].
-  int64_t sn_ckpt_ = 0;
 
   // The sent list.
   std::set<int64_t> sent_;
@@ -395,17 +413,25 @@ int TailCheckpoint_RedisCommand(RedisModuleCtx* ctx,
         ctx, "ERR this command must be called on the tail.");
   }
 
+  // Open the checkpoint.
+  leveldb::DB* ckpt;
+  leveldb::Status s = module.OpenCheckpoint(&ckpt);
+  HandleNonOk(ctx, s);
+  std::unique_ptr<leveldb::DB> ptr(ckpt);  // RAII.
+
+  // TODO(zongheng): the following checkpoints the range [sn_ckpt, sn_latest],
+  // but any smaller chunk is valid (and perhaps desirable, when we want to keep
+  // this redis command running < 1ms, say.)
+  int64_t sn_ckpt = 0;
+  s = LookupCheckpointWatermark(ckpt, &sn_ckpt);
+  HandleNonOk(ctx, s);
+  const int64_t sn_latest = module.sn();
+
   // Fill in "redis key -> redis value".
   std::vector<std::string> keys_to_write;
   std::vector<std::string> vals_to_write;
   const auto& sn_to_key = module.sn_to_key();
   size_t size = 0;
-
-  // TODO(zongheng): the following checkpoints the range [sn_ckpt_, sn_], but
-  // any smaller chunk will do (and perhaps desirable, when we want to keep this
-  // redis command running < 1ms, say.)
-  const int64_t sn_latest = module.sn();
-  const int64_t sn_ckpt = module.sn_ckpt();
   for (int64_t s = sn_ckpt; s <= sn_latest; ++s) {
     auto i = sn_to_key.find(s);
     CHECK(i != sn_to_key.end())
@@ -419,22 +445,19 @@ int TailCheckpoint_RedisCommand(RedisModuleCtx* ctx,
   }
 
   // Actually write this out.
-  leveldb::DB* ckpt;
-  leveldb::Status s = module.OpenCheckpoint(&ckpt);
-  HandleNonOk(ctx, s);
-  std::unique_ptr<leveldb::DB> ptr(ckpt);  // RAII.
   leveldb::WriteBatch batch;
-  for (int i = 0; i < keys_to_write.size(); ++i) {
+  for (size_t i = 0; i < keys_to_write.size(); ++i) {
     batch.Put(keys_to_write[i], vals_to_write[i]);
   }
   // TODO(zongheng): tune WriteOptions (sync, compression, etc).
   s = ckpt->Write(leveldb::WriteOptions(), &batch);
   HandleNonOk(ctx, s);
 
-  const int64_t checkpointed = sn_latest - sn_ckpt + 1;
-  module.set_sn_ckpt(sn_latest +
-                     1);  // TODO(zongheng): persist sn_ckpt into db.
-  return RedisModule_ReplyWithLongLong(ctx, checkpointed);
+  s = SetCheckpointWatermark(ckpt, sn_latest + 1);
+  HandleNonOk(ctx, s);
+
+  const int64_t num_checkpointed = sn_latest - sn_ckpt + 1;
+  return RedisModule_ReplyWithLongLong(ctx, num_checkpointed);
 }
 
 // LIST.CHECKPOINT: print to stdout all keys, values in the checkpoint file.
@@ -455,6 +478,10 @@ int ListCheckpoint_RedisCommand(RedisModuleCtx* ctx,
   leveldb::Iterator* it = ckpt->NewIterator(leveldb::ReadOptions());
   std::unique_ptr<leveldb::Iterator> iptr(it);  // RAII.
   for (it->SeekToFirst(); it->Valid(); it->Next()) {
+    if (it->key().ToString() == kCheckpointHeaderKey) {
+      // Let's skip the special header for prettier printing.
+      continue;
+    }
     LOG(INFO) << it->key().ToString() << ": " << it->value().ToString();
   }
   LOG(INFO) << "-- Done.";
