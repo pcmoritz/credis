@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include <map>
+#include <memory>
 #include <set>
 #include <string>
 #include <vector>
@@ -19,14 +20,20 @@ extern "C" {
 #include "redis/src/ae.h"
 }
 
-#include <glog/logging.h>
+#include "glog/logging.h"
 #include "leveldb/db.h"
+#include "leveldb/write_batch.h"
 
 #include "utils.h"
+
+// TODO(zongheng): don't hardcode.
+static constexpr const char* const kCheckpointPath = "/tmp/gcs_ckpt";
 
 extern "C" {
 aeEventLoop* getEventLoop();
 }
+
+namespace {
 
 redisAsyncContext* AsyncConnect(const std::string& address, int port) {
   redisAsyncContext* c = redisAsyncConnect(address.c_str(), port);
@@ -41,6 +48,17 @@ redisAsyncContext* AsyncConnect(const std::string& address, int port) {
   }
   return c;
 }
+
+int HandleNonOk(RedisModuleCtx* ctx, leveldb::Status s) {
+  if (s.ok()) {
+    return REDISMODULE_OK;
+  }
+  LOG(ERROR) << s.ToString();
+  RedisModule_ReplyWithSimpleString(ctx, "ERR");
+  return REDISMODULE_ERR;
+}
+
+}  // namespace
 
 class RedisChainModule {
  public:
@@ -84,6 +102,12 @@ class RedisChainModule {
     } else {
       parent_ = NULL;
     }
+  }
+
+  leveldb::Status OpenCheckpoint(leveldb::DB** db) {
+    static leveldb::Options options;
+    options.create_if_missing = true;
+    return leveldb::DB::Open(options, kCheckpointPath, db);
   }
 
   void set_role(ChainRole chain_role) { chain_role_ = chain_role; }
@@ -394,16 +418,48 @@ int TailCheckpoint_RedisCommand(RedisModuleCtx* ctx,
     vals_to_write.emplace_back(std::string(value, size));
   }
 
-  // TODO(zongheng): actually write this out.
-  leveldb::DB* db;
-  leveldb::Options options;
-  options.create_if_missing = true;
-  leveldb::Status status = leveldb::DB::Open(options, "/tmp/testdb", &db);
-  LOG(INFO) << "leveldb " << status.ok();
+  // Actually write this out.
+  leveldb::DB* ckpt;
+  leveldb::Status s = module.OpenCheckpoint(&ckpt);
+  HandleNonOk(ctx, s);
+  std::unique_ptr<leveldb::DB> ptr(ckpt);  // RAII.
+  leveldb::WriteBatch batch;
+  for (int i = 0; i < keys_to_write.size(); ++i) {
+    batch.Put(keys_to_write[i], vals_to_write[i]);
+  }
+  // TODO(zongheng): tune WriteOptions (sync, compression, etc).
+  s = ckpt->Write(leveldb::WriteOptions(), &batch);
+  HandleNonOk(ctx, s);
 
   const int64_t checkpointed = sn_latest - sn_ckpt + 1;
-  module.set_sn_ckpt(sn_latest + 1);
+  module.set_sn_ckpt(sn_latest +
+                     1);  // TODO(zongheng): persist sn_ckpt into db.
   return RedisModule_ReplyWithLongLong(ctx, checkpointed);
+}
+
+// LIST.CHECKPOINT: print to stdout all keys, values in the checkpoint file.
+//
+// For debugging.
+int ListCheckpoint_RedisCommand(RedisModuleCtx* ctx,
+                                RedisModuleString** argv,
+                                int argc) {
+  REDISMODULE_NOT_USED(argv);
+  if (argc != 1) {  // No arg needed.
+    return RedisModule_WrongArity(ctx);
+  }
+  leveldb::DB* ckpt;
+  leveldb::Status s = module.OpenCheckpoint(&ckpt);
+  HandleNonOk(ctx, s);
+  std::unique_ptr<leveldb::DB> ptr(ckpt);  // RAII.
+  LOG(INFO) << "-- LIST.CHECKPOINT:";
+  leveldb::Iterator* it = ckpt->NewIterator(leveldb::ReadOptions());
+  std::unique_ptr<leveldb::Iterator> iptr(it);  // RAII.
+  for (it->SeekToFirst(); it->Valid(); it->Next()) {
+    LOG(INFO) << it->key().ToString() << ": " << it->value().ToString();
+  }
+  LOG(INFO) << "-- Done.";
+  HandleNonOk(ctx, it->status());
+  return RedisModule_ReplyWithSimpleString(ctx, "OK");
 }
 
 // MEMBER.SN: the largest SN processed by this node.
@@ -426,6 +482,7 @@ int RedisModule_OnLoad(RedisModuleCtx* ctx,
                        int argc) {
   REDISMODULE_NOT_USED(argc);
   REDISMODULE_NOT_USED(argv);
+
   if (RedisModule_Init(ctx, "MEMBER", 1, REDISMODULE_APIVER_1) ==
       REDISMODULE_ERR) {
     return REDISMODULE_ERR;
@@ -466,6 +523,12 @@ int RedisModule_OnLoad(RedisModuleCtx* ctx,
   }
 
   // Debugging only.
+  if (RedisModule_CreateCommand(ctx, "LIST.CHECKPOINT",
+                                ListCheckpoint_RedisCommand, "readonly",
+                                /*firstkey=*/-1, /*lastkey=*/-1,
+                                /*keystep=*/0) == REDISMODULE_ERR) {
+    return REDISMODULE_ERR;
+  }
   if (RedisModule_CreateCommand(ctx, "MEMBER.SN", MemberSn_RedisCommand,
                                 "readonly",
                                 /*firstkey=*/-1, /*lastkey=*/-1,

@@ -12,7 +12,7 @@ extern "C" {
 #include "redismodule.h"
 }
 
-#include <glog/logging.h>
+#include "glog/logging.h"
 
 #include "utils.h"
 
