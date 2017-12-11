@@ -20,6 +20,7 @@ extern "C" {
 }
 
 #include <glog/logging.h>
+#include "leveldb/db.h"
 
 #include "utils.h"
 
@@ -394,7 +395,11 @@ int TailCheckpoint_RedisCommand(RedisModuleCtx* ctx,
   }
 
   // TODO(zongheng): actually write this out.
-  // LOG(INFO) << "# entries to write: " << keys_to_write.size() ;
+  leveldb::DB* db;
+  leveldb::Options options;
+  options.create_if_missing = true;
+  leveldb::Status status = leveldb::DB::Open(options, "/tmp/testdb", &db);
+  LOG(INFO) << "leveldb " << status.ok();
 
   const int64_t checkpointed = sn_latest - sn_ckpt + 1;
   module.set_sn_ckpt(sn_latest + 1);
