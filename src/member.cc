@@ -528,7 +528,7 @@ int HeadFlush_RedisCommand(RedisModuleCtx* ctx,
     return reply;
   }
   // sn_ckpt has not been incremented, so no new data can be flushed yet.
-  return RedisModule_ReplyWithLongLong(ctx, "Nothing to flush");
+  return RedisModule_ReplyWithSimpleString(ctx, "Nothing to flush");
 }
 
 // LIST.CHECKPOINT: print to stdout all keys, values in the checkpoint file.
@@ -558,6 +558,40 @@ int ListCheckpoint_RedisCommand(RedisModuleCtx* ctx,
   LOG(INFO) << "-- Done.";
   HandleNonOk(ctx, it->status());
   return RedisModule_ReplyWithSimpleString(ctx, "OK");
+}
+
+// READ: like redis' own GET, but can fall back to checkpoint file.
+int Read_RedisCommand(RedisModuleCtx* ctx, RedisModuleString** argv, int argc) {
+  if (argc != 2) {
+    return RedisModule_WrongArity(ctx);
+  }
+  if (module.chain_role() != RedisChainModule::ChainRole::kTail) {
+    return RedisModule_ReplyWithError(
+        ctx, "ERR this command must be called on the tail.");
+  }
+
+  KeyReader reader(ctx, argv[1]);
+  if (!reader.IsEmpty()) {
+    size_t size = 0;
+    const char* value = reader.value(&size);
+    return RedisModule_ReplyWithStringBuffer(ctx, value, size);
+  } else {
+    // Fall back to checkpoint file.
+    leveldb::DB* ckpt;
+    leveldb::Status s = module.OpenCheckpoint(&ckpt);
+    HandleNonOk(ctx, s);
+    std::unique_ptr<leveldb::DB> ptr(ckpt);  // RAII.
+
+    size_t size = 0;
+    const char* key = reader.key(&size);
+    std::string value;
+    s = ckpt->Get(leveldb::ReadOptions(), leveldb::Slice(key, size), &value);
+    if (s.IsNotFound()) {
+      return RedisModule_ReplyWithNull(ctx);
+    }
+    HandleNonOk(ctx, s);
+    return RedisModule_ReplyWithStringBuffer(ctx, value.data(), value.size());
+  }
 }
 
 // MEMBER.SN: the largest SN processed by this node.
@@ -591,6 +625,7 @@ int RedisModule_OnLoad(RedisModuleCtx* ctx,
     return REDISMODULE_ERR;
   }
 
+  // TODO(zongheng): This should be renamed: it's only ever called on head.
   if (RedisModule_CreateCommand(ctx, "MEMBER.PUT", MemberPut_RedisCommand,
                                 "write", 1, 1, 1) == REDISMODULE_ERR) {
     return REDISMODULE_ERR;
@@ -610,6 +645,13 @@ int RedisModule_OnLoad(RedisModuleCtx* ctx,
 
   if (RedisModule_CreateCommand(ctx, "MEMBER.ACK", MemberAck_RedisCommand,
                                 "write", 1, 1, 1) == REDISMODULE_ERR) {
+    return REDISMODULE_ERR;
+  }
+
+  if (RedisModule_CreateCommand(
+          ctx, "READ", Read_RedisCommand,
+          "readonly",  // TODO(zongheng): is this ok?  It opens the db.
+          /*firstkey=*/-1, /*lastkey=*/-1, /*keystep=*/0) == REDISMODULE_ERR) {
     return REDISMODULE_ERR;
   }
 

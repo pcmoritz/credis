@@ -17,6 +17,10 @@ class KeyReader {
     key_ = reinterpret_cast<RedisModuleKey*>(
         RedisModule_OpenKey(ctx, name_, REDISMODULE_READ));
   }
+
+  KeyReader(RedisModuleCtx* ctx, RedisModuleString* key)
+      : KeyReader(ctx, ReadString(key)) {}
+
   ~KeyReader() {
     RedisModule_CloseKey(key_);
     RedisModule_FreeString(ctx_, name_);
@@ -26,6 +30,9 @@ class KeyReader {
   }
   const char* value(size_t* size) const {
     return RedisModule_StringDMA(key_, size, REDISMODULE_READ);
+  }
+  bool IsEmpty() const {
+    return RedisModule_KeyType(key_) == REDISMODULE_KEYTYPE_EMPTY;
   }
 
  private:
