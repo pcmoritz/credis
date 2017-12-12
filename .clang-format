@@ -4,3 +4,4 @@ DerivePointerAlignment: false
 IndentCaseLabels: false
 PointerAlignment: Left
 SpaceAfterCStyleCast: true
+BinPackParameters: false
