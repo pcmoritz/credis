@@ -24,6 +24,7 @@ extern "C" {
 #include "leveldb/db.h"
 #include "leveldb/write_batch.h"
 
+#include "master_client.h"
 #include "utils.h"
 
 const char* const kCheckpointPath =
@@ -35,6 +36,8 @@ const char* const kStringOne = "1";
 extern "C" {
 aeEventLoop* getEventLoop();
 }
+
+using Status = leveldb::Status;  // So that it can be easily replaced.
 
 namespace {
 
@@ -52,7 +55,7 @@ redisAsyncContext* AsyncConnect(const std::string& address, int port) {
   return c;
 }
 
-int HandleNonOk(RedisModuleCtx* ctx, leveldb::Status s) {
+int HandleNonOk(RedisModuleCtx* ctx, Status s) {
   if (s.ok()) {
     return REDISMODULE_OK;
   }
@@ -70,14 +73,13 @@ int HandleNonOk(RedisModuleCtx* ctx, leveldb::Status s) {
 // We store the sn_ckpt watermark in a special header entry in the checkpoint
 // DB, keyed by kCheckpointHeaderKey.  In the future, the value of this entry
 // can contain other metadata.
-leveldb::Status SetCheckpointWatermark(leveldb::DB* ckpt, int64_t sn_ckpt) {
+Status SetCheckpointWatermark(leveldb::DB* ckpt, int64_t sn_ckpt) {
   leveldb::Slice val(reinterpret_cast<char*>(&sn_ckpt), sizeof(int64_t));
   return ckpt->Put(leveldb::WriteOptions(), kCheckpointHeaderKey, val);
 }
-leveldb::Status LookupCheckpointWatermark(leveldb::DB* ckpt, int64_t* sn_ckpt) {
+Status LookupCheckpointWatermark(leveldb::DB* ckpt, int64_t* sn_ckpt) {
   std::string value;
-  leveldb::Status s =
-      ckpt->Get(leveldb::ReadOptions(), kCheckpointHeaderKey, &value);
+  Status s = ckpt->Get(leveldb::ReadOptions(), kCheckpointHeaderKey, &value);
 
   if (!s.ok() && !s.IsNotFound()) {
     return s;
@@ -89,7 +91,7 @@ leveldb::Status LookupCheckpointWatermark(leveldb::DB* ckpt, int64_t* sn_ckpt) {
     CHECK(tmp >= 0) << "Corrupted data, endianness?";
     *sn_ckpt = tmp;
   }
-  return leveldb::Status::OK();
+  return Status::OK();
 }
 
 }  // namespace
@@ -138,7 +140,11 @@ class RedisChainModule {
     }
   }
 
-  leveldb::Status OpenCheckpoint(leveldb::DB** db) {
+  Status ConnectToMaster(const std::string& address, int port) {
+    return master_client_.Connect(address, port);
+  }
+
+  Status OpenCheckpoint(leveldb::DB** db) {
     static leveldb::Options options;
     options.create_if_missing = true;
     return leveldb::DB::Open(options, kCheckpointPath, db);
@@ -180,6 +186,8 @@ class RedisChainModule {
   std::string prev_port_;
   std::string next_address_;
   std::string next_port_;
+
+  MasterClient master_client_;
 
   ChainRole chain_role_;
   // The previous node in the chain (or NULL if none)
@@ -336,6 +344,21 @@ int MemberSetRole_RedisCommand(RedisModuleCtx* ctx,
   return REDISMODULE_OK;
 }
 
+int MemberConnectToMaster_RedisCommand(RedisModuleCtx* ctx,
+                                       RedisModuleString** argv,
+                                       int argc) {
+  if (argc != 3) {
+    return RedisModule_WrongArity(ctx);
+  }
+  size_t size = 0;
+  const char* ptr = RedisModule_StringPtrLen(argv[1], &size);
+  long long port = 0;
+  RedisModule_StringToLongLong(argv[2], &port);
+  Status s = module.ConnectToMaster(std::string(ptr, size), port);
+  if (!s.ok()) return RedisModule_ReplyWithError(ctx, s.ToString().data());
+  return RedisModule_ReplyWithSimpleString(ctx, "OK");
+}
+
 // Put a key. This is only called on the head node by the client.
 // argv[1] is the key for the data
 // argv[2] is the data
@@ -435,7 +458,7 @@ int TailCheckpoint_RedisCommand(RedisModuleCtx* ctx,
 
   // Open the checkpoint.
   leveldb::DB* ckpt;
-  leveldb::Status s = module.OpenCheckpoint(&ckpt);
+  Status s = module.OpenCheckpoint(&ckpt);
   HandleNonOk(ctx, s);
   std::unique_ptr<leveldb::DB> ptr(ckpt);  // RAII.
 
@@ -499,7 +522,7 @@ int HeadFlush_RedisCommand(RedisModuleCtx* ctx,
 
   // Open the checkpoint, and read sn_ckpt watermark.
   leveldb::DB* ckpt;
-  leveldb::Status s = module.OpenCheckpoint(&ckpt);
+  Status s = module.OpenCheckpoint(&ckpt);
   HandleNonOk(ctx, s);
   std::unique_ptr<leveldb::DB> ptr(ckpt);  // RAII.
   int64_t sn_ckpt = 0;
@@ -542,7 +565,7 @@ int ListCheckpoint_RedisCommand(RedisModuleCtx* ctx,
     return RedisModule_WrongArity(ctx);
   }
   leveldb::DB* ckpt;
-  leveldb::Status s = module.OpenCheckpoint(&ckpt);
+  Status s = module.OpenCheckpoint(&ckpt);
   HandleNonOk(ctx, s);
   std::unique_ptr<leveldb::DB> ptr(ckpt);  // RAII.
   LOG(INFO) << "-- LIST.CHECKPOINT:";
@@ -578,7 +601,7 @@ int Read_RedisCommand(RedisModuleCtx* ctx, RedisModuleString** argv, int argc) {
   } else {
     // Fall back to checkpoint file.
     leveldb::DB* ckpt;
-    leveldb::Status s = module.OpenCheckpoint(&ckpt);
+    Status s = module.OpenCheckpoint(&ckpt);
     HandleNonOk(ctx, s);
     std::unique_ptr<leveldb::DB> ptr(ckpt);  // RAII.
 
@@ -622,6 +645,12 @@ int RedisModule_OnLoad(RedisModuleCtx* ctx,
   if (RedisModule_CreateCommand(ctx, "MEMBER.SET_ROLE",
                                 MemberSetRole_RedisCommand, "write", 1, 1,
                                 1) == REDISMODULE_ERR) {
+    return REDISMODULE_ERR;
+  }
+  if (RedisModule_CreateCommand(ctx, "MEMBER.CONNECT_TO_MASTER",
+                                MemberConnectToMaster_RedisCommand, "write",
+                                /*firstkey=*/-1, /*lastkey=*/-1,
+                                /*keystep=*/0) == REDISMODULE_ERR) {
     return REDISMODULE_ERR;
   }
 

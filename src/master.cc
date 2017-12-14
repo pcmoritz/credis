@@ -55,7 +55,7 @@ int MasterAdd_RedisCommand(RedisModuleCtx* ctx,
   std::string address = ReadString(argv[1]);
   std::string port = ReadString(argv[2]);
 
-  size_t size = members.size();
+  const size_t size = members.size();
   redisContext* context = SyncConnect(address, std::stoi(port));
 
   if (size == 0) {
