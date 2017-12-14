@@ -5,8 +5,15 @@
 
 #include "redis_decls.h"
 
+extern "C" {
+#include "hiredis/hiredis.h"
+}
+
 // Convert RedisModuleString to C++ string.
 std::string ReadString(RedisModuleString* str);
+
+// On success, returns a synchronous redisContext client; else exit(1).
+redisContext* SyncConnect(const std::string& address, int port);
 
 // Helper class to read data from a key and handle closing the key in an
 // appropriate way.

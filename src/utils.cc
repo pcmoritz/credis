@@ -1,9 +1,29 @@
 #include "utils.h"
 
+extern "C" {
+#include "hiredis/async.h"
+#include "hiredis/hiredis.h"
+}
+
 std::string ReadString(RedisModuleString* str) {
   size_t l = 0;
   const char* s = RedisModule_StringPtrLen(str, &l);
   return std::string(s, l);
+}
+
+redisContext* SyncConnect(const std::string& address, int port) {
+  struct timeval timeout = {1, 500000};  // 1.5 seconds
+  redisContext* c = redisConnectWithTimeout(address.c_str(), port, timeout);
+  if (c == NULL || c->err) {
+    if (c) {
+      printf("Connection error: %s\n", c->errstr);
+      redisFree(c);
+    } else {
+      printf("Connection error: can't allocate redis context\n");
+    }
+    exit(1);
+  }
+  return c;
 }
 
 KeyReader::KeyReader(RedisModuleCtx* ctx, const std::string& key) : ctx_(ctx) {

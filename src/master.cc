@@ -24,21 +24,6 @@ struct Member {
 
 std::vector<Member> members;
 
-redisContext* SyncConnect(const std::string& address, int port) {
-  struct timeval timeout = {1, 500000};  // 1.5 seconds
-  redisContext* c = redisConnectWithTimeout(address.c_str(), port, timeout);
-  if (c == NULL || c->err) {
-    if (c) {
-      printf("Connection error: %s\n", c->errstr);
-      redisFree(c);
-    } else {
-      printf("Connection error: can't allocate redis context\n");
-    }
-    exit(1);
-  }
-  return c;
-}
-
 long long SetRole(redisContext* context,
                   const std::string& role,
                   const std::string& prev_address,

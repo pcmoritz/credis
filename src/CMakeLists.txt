@@ -15,18 +15,28 @@ else()
   set(REDIS_MODULE_LDFLAGS -shared)
 endif()
 
+# utils
 add_library(utils STATIC utils.cc)
 target_compile_options(utils PUBLIC ${REDIS_MODULE_CFLAGS} -fPIC)
 
+# master_client
+add_library(master_client STATIC master_client.cc)
+target_compile_options(master_client PUBLIC ${REDIS_MODULE_CFLAGS} -fPIC)
+target_link_libraries(master_client ${LevelDB_LIBRARIES})
+target_link_libraries(master_client glog::glog)
+
+# master
 add_library(master SHARED master.cc)
 target_compile_options(master PUBLIC ${REDIS_MODULE_CFLAGS} -fPIC)
 target_link_libraries(master ${REDIS_MODULE_LDFLAGS})
 target_link_libraries(master utils)
 target_link_libraries(master glog::glog)
 
+# member
 add_library(member SHARED member.cc)
 target_compile_options(member PUBLIC ${REDIS_MODULE_CFLAGS} -fPIC)
 target_link_libraries(member ${REDIS_MODULE_LDFLAGS})
 target_link_libraries(member utils)
 target_link_libraries(member glog::glog)
 target_link_libraries(member ${LevelDB_LIBRARIES})
+target_link_libraries(member master_client)
