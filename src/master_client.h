@@ -45,7 +45,7 @@ class MasterClient {
 
   std::unique_ptr<redisContext> redis_context_;
 
-  static constexpr int64_t kSnCkptInit = -1;
+  static constexpr int64_t kSnCkptInit = 0;
   static constexpr int64_t kSnFlushedInit = 0;
 };
 

@@ -16,12 +16,11 @@ constexpr const char* MasterClient::WatermarkKey(Watermark w) const {
 Status MasterClient::GetWatermark(Watermark w, int64_t* val) const {
   redisReply* reply = reinterpret_cast<redisReply*>(
       redisCommand(redis_context_.get(), "GET %s", WatermarkKey(w)));
-  std::string reply_str(reply->str, reply->len);  // Can be optimized
-  LOG(INFO) << "GET " << WatermarkKey(w) << ": " << reply_str;
-
+  const std::string reply_str(reply->str, reply->len);  // Can be optimized
+  const int reply_type = reply->type;
   freeReplyObject(reply);
 
-  if (reply_str == "nil") {
+  if (reply_type == REDIS_REPLY_NIL) {
     switch (w) {
     case Watermark::kSnCkpt:
       *val = kSnCkptInit;
@@ -35,7 +34,8 @@ Status MasterClient::GetWatermark(Watermark w, int64_t* val) const {
     return Status::OK();
   }
 
-  *val = *reinterpret_cast<int64_t*>(reply_str.data(), sizeof(int64_t));
+  *val = *reinterpret_cast<const int64_t*>(reply_str.data());
+  LOG(INFO) << "GET " << WatermarkKey(w) << ": " << *val;
   return Status::OK();
 }
 
@@ -44,7 +44,7 @@ Status MasterClient::SetWatermark(Watermark w, int64_t new_val) {
 
   redisReply* reply = reinterpret_cast<redisReply*>(
       redisCommand(redis_context_.get(), "SET %s %b", WatermarkKey(w),
-                   new_val_data, sizeof(new_val)));
+                   new_val_data, sizeof(int64_t)));
 
   std::string reply_str(reply->str, reply->len);  // Can be optimized
   LOG(INFO) << "SET " << WatermarkKey(w) << " " << new_val << ": " << reply_str;

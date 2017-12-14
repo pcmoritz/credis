@@ -64,36 +64,6 @@ int HandleNonOk(RedisModuleCtx* ctx, Status s) {
   return REDISMODULE_ERR;
 }
 
-// sn_ckpt: smallest sn yet to be checkpointed.
-//
-// Properties of various watermarks (and their extreme cases):
-//   sn_ckpt <= sn_latest_tail + 1 (i.e., everything has been checkpointed)
-//   sn_flushed < sn_ckpt (i.e., all checkpointed data has been flushed)
-//
-// We store the sn_ckpt watermark in a special header entry in the checkpoint
-// DB, keyed by kCheckpointHeaderKey.  In the future, the value of this entry
-// can contain other metadata.
-Status SetCheckpointWatermark(leveldb::DB* ckpt, int64_t sn_ckpt) {
-  leveldb::Slice val(reinterpret_cast<char*>(&sn_ckpt), sizeof(int64_t));
-  return ckpt->Put(leveldb::WriteOptions(), kCheckpointHeaderKey, val);
-}
-Status LookupCheckpointWatermark(leveldb::DB* ckpt, int64_t* sn_ckpt) {
-  std::string value;
-  Status s = ckpt->Get(leveldb::ReadOptions(), kCheckpointHeaderKey, &value);
-
-  if (!s.ok() && !s.IsNotFound()) {
-    return s;
-  }
-  if (s.IsNotFound()) {
-    *sn_ckpt = 0;  // No checkpointed data yet.
-  } else {
-    const int64_t tmp = *reinterpret_cast<const int64_t*>(value.data());
-    CHECK(tmp >= 0) << "Corrupted data, endianness?";
-    *sn_ckpt = tmp;
-  }
-  return Status::OK();
-}
-
 }  // namespace
 
 class RedisChainModule {
@@ -143,6 +113,7 @@ class RedisChainModule {
   Status ConnectToMaster(const std::string& address, int port) {
     return master_client_.Connect(address, port);
   }
+  MasterClient& Master() { return master_client_; }
 
   Status OpenCheckpoint(leveldb::DB** db) {
     static leveldb::Options options;
@@ -150,12 +121,12 @@ class RedisChainModule {
     return leveldb::DB::Open(options, kCheckpointPath, db);
   }
 
-  void set_role(ChainRole chain_role) { chain_role_ = chain_role; }
-  ChainRole chain_role() const { return chain_role_; }
+  void SetRole(ChainRole chain_role) { chain_role_ = chain_role; }
+  ChainRole Role() const { return chain_role_; }
   constexpr const char* ChainRoleName() const {
-    return chain_role() == ChainRole::kHead
+    return Role() == ChainRole::kHead
                ? "HEAD"
-               : (chain_role() == ChainRole::kMiddle ? "MIDDLE" : "TAIL");
+               : (Role() == ChainRole::kMiddle ? "MIDDLE" : "TAIL");
   }
 
   std::string prev_address() { return prev_address_; }
@@ -237,7 +208,7 @@ int Put(RedisModuleCtx* ctx,
   }
 
   std::string seqnum = std::to_string(sn);
-  if (module.chain_role() == RedisChainModule::ChainRole::kTail) {
+  if (module.Role() == RedisChainModule::ChainRole::kTail) {
     RedisModuleCallReply* reply =
         RedisModule_Call(ctx, "PUBLISH", "cc", "answers", seqnum.c_str());
     if (RedisModule_CallReplyType(reply) == REDISMODULE_REPLY_ERROR) {
@@ -282,11 +253,11 @@ int MemberSetRole_RedisCommand(RedisModuleCtx* ctx,
   }
   std::string role = ReadString(argv[1]);
   if (role == "head") {
-    module.set_role(RedisChainModule::ChainRole::kHead);
+    module.SetRole(RedisChainModule::ChainRole::kHead);
   } else if (role == "middle") {
-    module.set_role(RedisChainModule::ChainRole::kMiddle);
+    module.SetRole(RedisChainModule::ChainRole::kMiddle);
   } else if (role == "tail") {
-    module.set_role(RedisChainModule::ChainRole::kTail);
+    module.SetRole(RedisChainModule::ChainRole::kTail);
   } else {
     assert(role == "");
   }
@@ -368,7 +339,7 @@ int MemberPut_RedisCommand(RedisModuleCtx* ctx,
   if (argc != 3) {
     return RedisModule_WrongArity(ctx);
   }
-  if (module.chain_role() == RedisChainModule::ChainRole::kHead) {
+  if (module.Role() == RedisChainModule::ChainRole::kHead) {
     long long sn = module.inc_sn();
     return Put(ctx, argv[1], argv[2], sn, /*is_flush=*/false);
   } else {
@@ -451,22 +422,17 @@ int TailCheckpoint_RedisCommand(RedisModuleCtx* ctx,
   if (argc != 1) {  // No arg needed.
     return RedisModule_WrongArity(ctx);
   }
-  if (module.chain_role() != RedisChainModule::ChainRole::kTail) {
+  if (module.Role() != RedisChainModule::ChainRole::kTail) {
     return RedisModule_ReplyWithError(
         ctx, "ERR this command must be called on the tail.");
   }
-
-  // Open the checkpoint.
-  leveldb::DB* ckpt;
-  Status s = module.OpenCheckpoint(&ckpt);
-  HandleNonOk(ctx, s);
-  std::unique_ptr<leveldb::DB> ptr(ckpt);  // RAII.
 
   // TODO(zongheng): the following checkpoints the range [sn_ckpt, sn_latest],
   // but any smaller chunk is valid (and perhaps desirable, when we want to keep
   // this redis command running < 1ms, say.)
   int64_t sn_ckpt = 0;
-  s = LookupCheckpointWatermark(ckpt, &sn_ckpt);
+  Status s =
+      module.Master().GetWatermark(MasterClient::Watermark::kSnCkpt, &sn_ckpt);
   HandleNonOk(ctx, s);
   const int64_t sn_latest = module.sn();
 
@@ -492,11 +458,17 @@ int TailCheckpoint_RedisCommand(RedisModuleCtx* ctx,
   for (size_t i = 0; i < keys_to_write.size(); ++i) {
     batch.Put(keys_to_write[i], vals_to_write[i]);
   }
+  // Open the checkpoint.
+  leveldb::DB* ckpt;
+  s = module.OpenCheckpoint(&ckpt);
+  HandleNonOk(ctx, s);
+  std::unique_ptr<leveldb::DB> ptr(ckpt);  // RAII.
   // TODO(zongheng): tune WriteOptions (sync, compression, etc).
   s = ckpt->Write(leveldb::WriteOptions(), &batch);
   HandleNonOk(ctx, s);
 
-  s = SetCheckpointWatermark(ckpt, sn_latest + 1);
+  s = module.Master().SetWatermark(MasterClient::Watermark::kSnCkpt,
+                                   sn_latest + 1);
   HandleNonOk(ctx, s);
 
   const int64_t num_checkpointed = sn_latest - sn_ckpt + 1;
@@ -515,18 +487,15 @@ int HeadFlush_RedisCommand(RedisModuleCtx* ctx,
   if (argc != 1) {  // No arg needed.
     return RedisModule_WrongArity(ctx);
   }
-  if (module.chain_role() != RedisChainModule::ChainRole::kHead) {
+  if (module.Role() != RedisChainModule::ChainRole::kHead) {
     return RedisModule_ReplyWithError(
         ctx, "ERR this command must be called on the head.");
   }
 
-  // Open the checkpoint, and read sn_ckpt watermark.
-  leveldb::DB* ckpt;
-  Status s = module.OpenCheckpoint(&ckpt);
-  HandleNonOk(ctx, s);
-  std::unique_ptr<leveldb::DB> ptr(ckpt);  // RAII.
+  // Read sn_ckpt watermark from master.
   int64_t sn_ckpt = 0;
-  s = LookupCheckpointWatermark(ckpt, &sn_ckpt);
+  Status s =
+      module.Master().GetWatermark(MasterClient::Watermark::kSnCkpt, &sn_ckpt);
   HandleNonOk(ctx, s);
 
   // TODO(zongheng): is this even correct?  who/when will sn_flushed be changed?
@@ -588,7 +557,7 @@ int Read_RedisCommand(RedisModuleCtx* ctx, RedisModuleString** argv, int argc) {
   if (argc != 2) {
     return RedisModule_WrongArity(ctx);
   }
-  if (module.chain_role() != RedisChainModule::ChainRole::kTail) {
+  if (module.Role() != RedisChainModule::ChainRole::kTail) {
     return RedisModule_ReplyWithError(
         ctx, "ERR this command must be called on the tail.");
   }
