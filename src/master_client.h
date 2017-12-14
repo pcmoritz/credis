@@ -25,8 +25,8 @@ class MasterClient {
     kSnFlushed = 1,
   };
 
-  MasterClient();
-  ~MasterClient();
+  MasterClient(){};
+  ~MasterClient(){};
   Status Connect(const std::string& address, int port);
 
   // Watermark sequence numbers
