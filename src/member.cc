@@ -222,8 +222,6 @@ int Put(RedisModuleCtx* ctx,
       return RedisModule_ReplyWithCallReply(ctx, reply);
     }
   } else {
-    // TODO(zongheng): is the ordering of sent-list insertion & actual command
-    // launch important?
     std::string v = ReadString(data);
     LOG(INFO) << "calling MemberPropagate_RedisCommand";
     redisReply* reply = reinterpret_cast<redisReply*>(redisAsyncCommand(
