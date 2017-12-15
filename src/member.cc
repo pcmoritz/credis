@@ -149,9 +149,6 @@ class RedisChainModule {
   }
   void record_sn(int64_t sn) { sn_ = std::max(sn_, sn); }
 
-  int64_t sn_flushed() const { return sn_flushed_; }
-  void set_sn_flushed(int64_t s) { sn_flushed_ = s; }
-
  private:
   std::string prev_address_;
   std::string prev_port_;
@@ -174,8 +171,6 @@ class RedisChainModule {
   std::set<int64_t> sent_;
   // For implementing checkpointing.
   std::map<int64_t, std::string> sn_to_key_;
-
-  int64_t sn_flushed_ = 0;  // TODO(zongheng): persist in db.
 };
 
 RedisChainModule module;
@@ -198,15 +193,23 @@ int Put(RedisModuleCtx* ctx,
       RedisModule_OpenKey(ctx, name, REDISMODULE_WRITE));
   std::string k = ReadString(name);
   // TODO(pcm): error checking
+
+  // State maintenance.
   if (is_flush) {
     RedisModule_DeleteKey(key);
     module.sn_to_key().erase(sn);
+    // The tail has the responsibility of updating the sn_flushed watermark.
+    if (module.Role() == RedisChainModule::ChainRole::kTail) {
+      // "sn + 1" is the next sn to be flushed.
+      module.Master().SetWatermark(MasterClient::Watermark::kSnFlushed, sn + 1);
+    }
   } else {
     RedisModule_StringSet(key, data);
     module.sn_to_key()[sn] = k;
     module.record_sn(static_cast<int64_t>(sn));
   }
 
+  // Protocol.
   std::string seqnum = std::to_string(sn);
   if (module.Role() == RedisChainModule::ChainRole::kTail) {
     RedisModuleCallReply* reply =
@@ -492,22 +495,23 @@ int HeadFlush_RedisCommand(RedisModuleCtx* ctx,
         ctx, "ERR this command must be called on the head.");
   }
 
-  // Read sn_ckpt watermark from master.
-  int64_t sn_ckpt = 0;
-  Status s =
-      module.Master().GetWatermark(MasterClient::Watermark::kSnCkpt, &sn_ckpt);
-  HandleNonOk(ctx, s);
+  // Read watermarks from master.
+  // Clearly, we can provide a batch iface.
+  int64_t sn_ckpt = 0, sn_flushed = 0;
+  HandleNonOk(ctx, module.Master().GetWatermark(
+                       MasterClient::Watermark::kSnCkpt, &sn_ckpt));
+  HandleNonOk(ctx, module.Master().GetWatermark(
+                       MasterClient::Watermark::kSnFlushed, &sn_flushed));
+  LOG(INFO) << "sn_flushed " << sn_flushed << ", sn_ckpt " << sn_ckpt;
 
   // TODO(zongheng): is this even correct?  who/when will sn_flushed be changed?
   // someone needs to subscribe to tail notif.
 
   // Any prefix of the range [sn_flushed, sn_ckpt) can be flushed.  Here we
   // flush 1 next entry.
-  const int64_t sn_flushed = module.sn_flushed();
-  auto& sn_to_key = module.sn_to_key();
-  LOG(INFO) << "sn_flushed " << sn_flushed << " sn_ckpt " << sn_ckpt;
+  const auto& sn_to_key = module.sn_to_key();
   if (sn_flushed < sn_ckpt) {
-    auto it = sn_to_key.find(sn_flushed);
+    const auto it = sn_to_key.find(sn_flushed);
     CHECK(it != sn_to_key.end());
     RedisModuleString* key =
         RedisModule_CreateString(ctx, it->second.data(), it->second.size());
@@ -516,7 +520,6 @@ int HeadFlush_RedisCommand(RedisModuleCtx* ctx,
                     /*is_flush=*/true);
     // TODO(zongheng): probably need to check error.
     RedisModule_FreeString(ctx, key);
-    module.set_sn_flushed(sn_flushed + 1);
     return reply;
   }
   // sn_ckpt has not been incremented, so no new data can be flushed yet.
