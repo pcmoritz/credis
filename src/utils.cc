@@ -1,5 +1,7 @@
 #include "utils.h"
 
+#include "cstdlib"
+
 extern "C" {
 #include "hiredis/async.h"
 #include "hiredis/hiredis.h"
@@ -21,7 +23,7 @@ redisContext* SyncConnect(const std::string& address, int port) {
     } else {
       printf("Connection error: can't allocate redis context\n");
     }
-    exit(1);
+    std::exit(1);
   }
   return c;
 }
