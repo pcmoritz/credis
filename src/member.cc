@@ -232,7 +232,8 @@ int Put(RedisModuleCtx* ctx,
     freeReplyObject(reply);
     module.sent().insert(sn);
   }
-  RedisModule_ReplyWithNull(ctx);
+  // Return the sequence number
+  RedisModule_ReplyWithLongLong(ctx, sn);
   return REDISMODULE_OK;
 }
 
@@ -626,24 +627,24 @@ int RedisModule_OnLoad(RedisModuleCtx* ctx,
 
   // TODO(zongheng): This should be renamed: it's only ever called on head.
   if (RedisModule_CreateCommand(ctx, "MEMBER.PUT", MemberPut_RedisCommand,
-                                "write", 1, 1, 1) == REDISMODULE_ERR) {
+                                "write pubsub", 1, 1, 1) == REDISMODULE_ERR) {
     return REDISMODULE_ERR;
   }
 
   if (RedisModule_CreateCommand(ctx, "MEMBER.PROPAGATE",
-                                MemberPropagate_RedisCommand, "write", 1, 1,
+                                MemberPropagate_RedisCommand, "write pubsub", 1, 1,
                                 1) == REDISMODULE_ERR) {
     return REDISMODULE_ERR;
   }
 
   if (RedisModule_CreateCommand(ctx, "MEMBER.REPLICATE",
-                                MemberReplicate_RedisCommand, "write", 1, 1,
+                                MemberReplicate_RedisCommand, "write pubsub", 1, 1,
                                 1) == REDISMODULE_ERR) {
     return REDISMODULE_ERR;
   }
 
   if (RedisModule_CreateCommand(ctx, "MEMBER.ACK", MemberAck_RedisCommand,
-                                "write", 1, 1, 1) == REDISMODULE_ERR) {
+                                "write pubsub", 1, 1, 1) == REDISMODULE_ERR) {
     return REDISMODULE_ERR;
   }
 

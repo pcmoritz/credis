@@ -24,8 +24,11 @@ def test_ack():
     # The ack client needs to be separate, since subscriptions
     # are blocking
     ack_client = redis.StrictRedis("127.0.0.1", 6371)
-    head_client.execute_command("MEMBER.PUT", "task_spec", "some_random_value")
-    p = ack_client.pubsub()
+    p = ack_client.pubsub(ignore_subscribe_messages=True)
     p.subscribe("answers")
+    time.sleep(0.5)
+    p.get_message()
+    ssn = head_client.execute_command("MEMBER.PUT", "task_spec", "some_random_value")
+    time.sleep(0.5)
     put_ack = p.get_message()
-    assert put_ack["data"] == 1 # Check the sequence number
+    assert int(put_ack["data"]) == ssn # Check the sequence number
