@@ -25,9 +25,13 @@ class MasterClient {
     kSnFlushed = 1,
   };
 
-  MasterClient(){};
-  ~MasterClient(){};
   Status Connect(const std::string& address, int port);
+
+  // TODO(zongheng): impl.
+  // Retries the current head and tail nodes (for writes and reads,
+  // respectively).
+  Status Head(std::string* address, int* port);
+  Status Tail(std::string* address, int* port);
 
   // Watermark sequence numbers
   //
