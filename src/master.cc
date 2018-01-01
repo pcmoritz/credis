@@ -142,6 +142,48 @@ int MasterRemove_RedisCommand(RedisModuleCtx* ctx,
   return REDISMODULE_OK;
 }
 
+// MASTER.REFRESH_HEAD: return the current head if non-faulty, otherwise
+// designate the child of the old head as the new head.
+//
+// Returns, as a string, "<new head addr>:<new head port>".
+int MasterRefreshHead_RedisCommand(RedisModuleCtx* ctx,
+                                   RedisModuleString** argv,
+                                   int argc) {
+  REDISMODULE_NOT_USED(argv);
+  if (argc != 1) {
+    return RedisModule_WrongArity(ctx);
+  }
+
+  // RPC flow:
+  // 1. master -> head: try to connect, check that if it's dead.
+  // 2. (if dead) master cleans up state; then, master -> child of head:
+  //    SetRole(head).
+  // 3. (on ack) return from this function the new head.
+
+  CHECK(!members.empty());
+  redisContext* head = members[0].context;
+  // (1).
+  if (redisReconnect(head) == REDIS_OK) {
+    // Current head is good.
+    const std::string s = members[0].address + ":" + members[0].port;
+    return RedisModule_ReplyWithSimpleString(ctx, s.data());
+  }
+  // (2).
+  members.erase(members.begin());
+  CHECK(members.size() >= 1 &&
+        members.size() <= 2);  // TODO: implement adding a node?
+  if (members.size() == 1) {
+    SetRole(members[0].context, "head", "nil", "nil", "nil", "nil");
+  } else {
+    LOG(INFO) << "SetRole(head)";
+    SetRole(members[0].context, "head", /*prev addr and port*/ "nil", "nil",
+            /*re-use cached next addr and port*/ "", "");
+  }
+  // (3).
+  const std::string s = members[0].address + ":" + members[0].port;
+  return RedisModule_ReplyWithSimpleString(ctx, s.data());
+}
+
 extern "C" {
 
 int RedisModule_OnLoad(RedisModuleCtx* ctx,
@@ -151,16 +193,23 @@ int RedisModule_OnLoad(RedisModuleCtx* ctx,
   REDISMODULE_NOT_USED(argv);
 
   if (RedisModule_Init(ctx, "MASTER", 1, REDISMODULE_APIVER_1) ==
-      REDISMODULE_ERR)
+      REDISMODULE_ERR) {
     return REDISMODULE_ERR;
-
+  }
   if (RedisModule_CreateCommand(ctx, "MASTER.ADD", MasterAdd_RedisCommand,
-                                "write", 1, 1, 1) == REDISMODULE_ERR)
+                                "write", 1, 1, 1) == REDISMODULE_ERR) {
     return REDISMODULE_ERR;
-
+  }
   if (RedisModule_CreateCommand(ctx, "MASTER.REMOVE", MasterRemove_RedisCommand,
-                                "write", 1, 1, 1) == REDISMODULE_ERR)
+                                "write", 1, 1, 1) == REDISMODULE_ERR) {
     return REDISMODULE_ERR;
+  }
+  if (RedisModule_CreateCommand(ctx, "MASTER.REFRESH_HEAD",
+                                MasterRefreshHead_RedisCommand, "write",
+                                /*firstkey=*/-1, /*lastkey=*/-1,
+                                /*keystep=*/0) == REDISMODULE_ERR) {
+    return REDISMODULE_ERR;
+  }
 
   return REDISMODULE_OK;
 }

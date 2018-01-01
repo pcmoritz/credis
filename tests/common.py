@@ -52,9 +52,15 @@ def MasterClient():
 head_client = redis.StrictRedis("127.0.0.1", PORTS[1])
 
 
-# TODO(zongheng): change this to actually query the current head.
 def GetHeadFromMaster(master_client):
     return head_client
+
+
+def RefreshHeadFromMaster(master_client):
+    head_addr_port = master_client.execute_command("MASTER.REFRESH_HEAD")
+    print('head_addr_port: %s' % head_addr_port)
+    splits = head_addr_port.split(b':')
+    return redis.StrictRedis(splits[0], int(splits[1]))
 
 
 def KillNode(index):

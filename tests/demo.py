@@ -4,23 +4,38 @@ import time
 import numpy as np
 
 import common
-from common import AckClient, GetHeadFromMaster, MasterClient, startcredis
+import redis
+from common import AckClient, GetHeadFromMaster, MasterClient, startcredis, RefreshHeadFromMaster
 
 ack_client = AckClient()
 master_client = MasterClient()
+head_client = GetHeadFromMaster(master_client)
 
 
 def SeqPut(n, ops_completed):
     """For i in range(n), sequentially put i->i into redis."""
     p = ack_client.pubsub(ignore_subscribe_messages=True)
     p.subscribe("answers")
-    head_client = GetHeadFromMaster(master_client)
 
     def Put(i):
-        sn = head_client.execute_command("MEMBER.PUT", str(i), str(i))
-        for ack in p.listen():  # Blocks.
-            assert int(ack["data"]) == sn
-            break
+        global head_client
+        issued = False
+        for k in range(3):  # Try 3 times.
+            try:
+                sn = head_client.execute_command("MEMBER.PUT", str(i), str(i))
+                issued = True
+                break
+            except redis.exceptions.ConnectionError as e:
+                head_client = RefreshHeadFromMaster(master_client)  # Blocking.
+                continue
+        if issued:
+            for ack in p.listen():  # Blocks.
+                assert int(ack["data"]) == sn
+                break
+        else:
+            raise Exception(
+                "Irrecoverable redis connection issue; put client %s" %
+                head_client)
 
     latencies = []
     for i in range(n):
@@ -42,10 +57,13 @@ def test_demo():
     driver = multiprocessing.Process(target=SeqPut, args=(n, ops_completed))
     driver.start()
 
-    # Kill head.
-    time.sleep(0.5)
-    common.KillNode(index=2)
+    # TODO(zongheng): when killing middle, program hangs somewhere.
+    # TODO(zongheng): when killing tail, handle ack client refresh.
+    # Kill.
+    time.sleep(0.05)
+    common.KillNode(index=0)
 
     driver.join()
+    # TODO(zongheng): issue a correctness check by reading back all i->i.
     print('Total ops %d, completed ops %d' % (n, ops_completed.value))
     assert ops_completed.value == n

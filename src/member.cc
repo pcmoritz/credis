@@ -41,6 +41,11 @@ using Status = leveldb::Status;  // So that it can be easily replaced.
 
 namespace {
 
+// void DisconnectCallback(const redisAsyncContext* c, int status) {
+//   LOG(INFO) << "disconnect status " << status;
+//   // "c" will be freed by hiredis.
+// }
+
 redisAsyncContext* AsyncConnect(const std::string& address, int port) {
   redisAsyncContext* c = redisAsyncConnect(address.c_str(), port);
   if (c == NULL || c->err) {
@@ -52,6 +57,7 @@ redisAsyncContext* AsyncConnect(const std::string& address, int port) {
     }
     exit(1);
   }
+  // redisAsyncSetDisconnectCallback(c, &DisconnectCallback);
   return c;
 }
 
@@ -93,10 +99,16 @@ class RedisChainModule {
     next_port_ = next_port;
 
     if (child_) {
-      redisAsyncFree(child_);
+      if (!child_->err) {
+        // A weird behavior is that when "err" is present (which likely
+        // indicates a remote crash), redisAsyncFree() crashes.  Same below.
+        redisAsyncFree(child_);
+      }
     }
     if (parent_) {
-      redisAsyncFree(parent_);
+      if (!parent_->err) {
+        redisAsyncFree(parent_);
+      }
     }
     if (next_address != "nil") {
       child_ = AsyncConnect(next_address, std::stoi(next_port));
@@ -632,14 +644,14 @@ int RedisModule_OnLoad(RedisModuleCtx* ctx,
   }
 
   if (RedisModule_CreateCommand(ctx, "MEMBER.PROPAGATE",
-                                MemberPropagate_RedisCommand, "write pubsub", 1, 1,
-                                1) == REDISMODULE_ERR) {
+                                MemberPropagate_RedisCommand, "write pubsub", 1,
+                                1, 1) == REDISMODULE_ERR) {
     return REDISMODULE_ERR;
   }
 
   if (RedisModule_CreateCommand(ctx, "MEMBER.REPLICATE",
-                                MemberReplicate_RedisCommand, "write pubsub", 1, 1,
-                                1) == REDISMODULE_ERR) {
+                                MemberReplicate_RedisCommand, "write pubsub", 1,
+                                1, 1) == REDISMODULE_ERR) {
     return REDISMODULE_ERR;
   }
 
