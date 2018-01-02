@@ -39,11 +39,20 @@ aeEventLoop* getEventLoop();
 
 using Status = leveldb::Status;  // So that it can be easily replaced.
 
+// TODO(zongheng): whenever we are about to do redisAsyncCommand(remote, ...),
+// we should test for remote->err first.  See the NOTE in Put().
+
 namespace {
 
 // void DisconnectCallback(const redisAsyncContext* c, int status) {
-//   LOG(INFO) << "disconnect status " << status;
-//   // "c" will be freed by hiredis.
+//   LOG(INFO) << "Disconnect status " << status;
+//   // Error codes are defined in read.h under hiredis.
+//   LOG(INFO) << "c->err " << c->err;
+//   LOG(INFO) << "c->errstr " << std::string(c->errstr);
+//   // "c" will be freed by hiredis.  Quote: "The context object is always
+//   freed
+//   // after the disconnect callback fired. When a reconnect is needed, the
+//   // disconnect callback is a good point to do so."
 // }
 
 redisAsyncContext* AsyncConnect(const std::string& address, int port) {
@@ -248,15 +257,26 @@ int Put(RedisModuleCtx* ctx,
       return RedisModule_ReplyWithCallReply(ctx, reply);
     }
   } else {
-    std::string v = ReadString(data);
-    LOG(INFO) << "calling MemberPropagate_RedisCommand";
-    redisReply* reply = reinterpret_cast<redisReply*>(redisAsyncCommand(
-        module.child(), NULL, NULL, "MEMBER.PROPAGATE %b %b %b %s", k.data(),
-        k.size(), v.data(), v.size(), seqnum.data(), seqnum.size(),
-        is_flush ? kStringOne : kStringZero));
-    LOG(INFO) << "Done";
-    freeReplyObject(reply);
-    module.sent().insert(sn);
+    const std::string v = ReadString(data);
+    // NOTE: here we do redisAsyncCommand(child, ...).  However, if the child
+    // crashed before the call, this function non-deterministically crashes
+    // with, say, a single digit percent chance.  We guard against this by
+    // testing the "err" field first.
+    if (!module.child()->err) {
+      LOG(INFO) << "Calling MemberPropagate_RedisCommand";
+      const int status = redisAsyncCommand(
+          module.child(), NULL, NULL, "MEMBER.PROPAGATE %b %b %b %s", k.data(),
+          k.size(), v.data(), v.size(), seqnum.data(), seqnum.size(),
+          is_flush ? kStringOne : kStringZero);
+      // TODO(zongheng): check status.
+      LOG(INFO) << "Done";
+      module.sent().insert(sn);
+    } else {
+      LOG(INFO) << "Child dead, waiting for master to intervene.";
+      LOG(INFO) << "Redis context error: '"
+                << std::string(module.child()->errstr) << "'.";
+      // TODO(zongheng): is it okay to reply SN to client in this case as well?
+    }
   }
   // Return the sequence number
   RedisModule_ReplyWithLongLong(ctx, sn);
@@ -330,11 +350,11 @@ int MemberSetRole_RedisCommand(RedisModuleCtx* ctx,
     KeyReader reader(ctx, key);
     size_t size;
     const char* value = reader.value(&size);
-    redisReply* reply = reinterpret_cast<redisReply*>(redisAsyncCommand(
+    const int status = redisAsyncCommand(
         module.child(), NULL, NULL, "MEMBER.PROPAGATE %b %b %b %s", key.data(),
         key.size(), value, size, sn.data(), sn.size(),
-        /*is_flush=*/kStringZero));
-    freeReplyObject(reply);
+        /*is_flush=*/kStringZero);
+    // TODO(zongheng): check status.
   }
 
   LOG(INFO) << "Called SET_ROLE with role " << module.ChainRoleName()
@@ -408,10 +428,10 @@ int MemberReplicate_RedisCommand(RedisModuleCtx* ctx,
     size_t key_size, value_size;
     const char* key_data = reader.key(&key_size);
     const char* value_data = reader.value(&value_size);
-    redisReply* reply = reinterpret_cast<redisReply*>(
+    const int status =
         redisAsyncCommand(module.child(), NULL, NULL, "SET %b %b", key_data,
-                          key_size, value_data, value_size));
-    freeReplyObject(reply);
+                          key_size, value_data, value_size);
+    // TODO(zongheng): check status.
   }
   LOG(INFO) << "Done replicating.";
   RedisModule_ReplyWithNull(ctx);
@@ -432,9 +452,9 @@ int MemberAck_RedisCommand(RedisModuleCtx* ctx,
   module.sent().erase(std::stoi(sn));
   if (module.parent()) {
     LOG(INFO) << "Propagating the ACK up the chain";
-    redisReply* reply = reinterpret_cast<redisReply*>(redisAsyncCommand(
-        module.parent(), NULL, NULL, "MEMBER.ACK %b", sn.data(), sn.size()));
-    freeReplyObject(reply);
+    const int status = redisAsyncCommand(module.parent(), NULL, NULL,
+                                         "MEMBER.ACK %b", sn.data(), sn.size());
+    // TODO(zongheng): check status.
   }
   RedisModule_ReplyWithNull(ctx);
   return REDISMODULE_OK;

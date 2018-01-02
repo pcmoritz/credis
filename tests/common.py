@@ -44,6 +44,14 @@ def AckClient():
     return redis.StrictRedis("127.0.0.1", PORTS[-1])
 
 
+def AckClientAndPubsub(client=None):
+    if client is None:
+        client = AckClient()
+    ack_pubsub = client.pubsub(ignore_subscribe_messages=True)
+    ack_pubsub.subscribe("answers")
+    return client, ack_pubsub
+
+
 def MasterClient():
     return redis.StrictRedis("127.0.0.1", PORTS[0])
 
@@ -60,6 +68,15 @@ def RefreshHeadFromMaster(master_client):
     print('head_addr_port: %s' % head_addr_port)
     splits = head_addr_port.split(b':')
     return redis.StrictRedis(splits[0], int(splits[1]))
+
+
+def RefreshTailFromMaster(master_client):
+    print('calling MASTER.REFRESH_TAIL')
+    tail_addr_port = master_client.execute_command("MASTER.REFRESH_TAIL")
+    print('tail_addr_port: %s' % tail_addr_port)
+    splits = tail_addr_port.split(b':')
+    c = redis.StrictRedis(splits[0], int(splits[1]))
+    return AckClientAndPubsub(c)
 
 
 def KillNode(index):

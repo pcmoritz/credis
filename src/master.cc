@@ -37,7 +37,7 @@ long long SetRole(redisContext* context,
                    prev_address.c_str(), prev_port.c_str(),
                    next_address.c_str(), next_port.c_str(), sn_string.c_str()));
   LOG(INFO) << "Last sequence number is " << reply->integer;
-  long long sn_result = reply->integer;
+  const long long sn_result = reply->integer;
   freeReplyObject(reply);
   return sn_result;
 }
@@ -133,6 +133,8 @@ int MasterRemove_RedisCommand(RedisModuleCtx* ctx,
     SetRole(members[0].context, "head", "nil", "nil", members[1].address,
             members[1].port);
   } else {
+    // TODO: this case is incompletely handled.  See "Failure of Other Servers"
+    // in the chain rep paper.
     LOG(INFO) << "Removed the middle node " << index << ".";
     const long long sn =
         SetRole(members[index].context, "", members[index - 1].address,
@@ -171,8 +173,9 @@ int MasterRefreshHead_RedisCommand(RedisModuleCtx* ctx,
   }
   // (2).
   members.erase(members.begin());
-  CHECK(members.size() >= 1 &&
-        members.size() <= 2);  // TODO: implement adding a node?
+  CHECK(members.size() >= 1 && members.size() <= 2)
+      << "Remaining chain members: "
+      << members.size();  // TODO: implement adding a node?
   if (members.size() == 1) {
     LOG(INFO) << "SetRole(singleton)";
     SetRole(members[0].context, "singleton", "nil", "nil", "nil", "nil");
@@ -183,6 +186,44 @@ int MasterRefreshHead_RedisCommand(RedisModuleCtx* ctx,
   }
   // (3).
   const std::string s = members[0].address + ":" + members[0].port;
+  return RedisModule_ReplyWithSimpleString(ctx, s.data());
+}
+
+// MASTER.REFRESH_TAIL: similar to MASTER.REFRESH_HEAD, but for getting the
+// up-to-date tail.
+int MasterRefreshTail_RedisCommand(RedisModuleCtx* ctx,
+                                   RedisModuleString** argv,
+                                   int argc) {
+  REDISMODULE_NOT_USED(argv);
+  if (argc != 1) {
+    return RedisModule_WrongArity(ctx);
+  }
+
+  // RPC flow is similar to MASTER.REFRESH_HEAD.
+  CHECK(!members.empty());
+  redisContext* tail = members.back().context;
+  // (1).
+  if (redisReconnect(tail) == REDIS_OK) {
+    // Current tail is good.
+    const std::string s = members.back().address + ":" + members.back().port;
+    return RedisModule_ReplyWithSimpleString(ctx, s.data());
+  }
+  // (2).
+  members.pop_back();
+  CHECK(members.size() >= 1 &&
+        members.size() <= 2);  // TODO: implement adding a node?
+  if (members.size() == 1) {
+    LOG(INFO) << "SetRole(singleton)";
+    SetRole(members[0].context, "singleton", "nil", "nil", "nil", "nil");
+  } else {
+    LOG(INFO) << "SetRole(tail)";
+    SetRole(members.back().context, "tail",
+            /*re-use cached prev addr and port*/ "", "",
+            /*next addr and port*/ "nil", "nil");
+  }
+  // (3).
+  const std::string s = members.back().address + ":" + members.back().port;
+  LOG(INFO) << "Returning from MasterRefreshTail_RedisCommand: " << s;
   return RedisModule_ReplyWithSimpleString(ctx, s.data());
 }
 
@@ -208,6 +249,12 @@ int RedisModule_OnLoad(RedisModuleCtx* ctx,
   }
   if (RedisModule_CreateCommand(ctx, "MASTER.REFRESH_HEAD",
                                 MasterRefreshHead_RedisCommand, "write",
+                                /*firstkey=*/-1, /*lastkey=*/-1,
+                                /*keystep=*/0) == REDISMODULE_ERR) {
+    return REDISMODULE_ERR;
+  }
+  if (RedisModule_CreateCommand(ctx, "MASTER.REFRESH_TAIL",
+                                MasterRefreshTail_RedisCommand, "write",
                                 /*firstkey=*/-1, /*lastkey=*/-1,
                                 /*keystep=*/0) == REDISMODULE_ERR) {
     return REDISMODULE_ERR;
