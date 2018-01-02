@@ -7,14 +7,13 @@ import redis
 
 # Ports, in the order of [master; replicas in chain].
 
-# FIXME: credis crashes on 1-node chain.
 PORTS = [6369, 6370]
-# SeqPut
-# latency (us): mean 1620.17155 std 334.57320 num 2000
-PORTS = [6369, 6370, 6371]
 # SeqPut
 # latency (us): mean 1716.46547 std 435.77646 num 2000
 PORTS = [6369, 6370, 6371, 6372]
+# SeqPut
+# latency (us): mean 1620.17155 std 334.57320 num 2000
+PORTS = [6369, 6370, 6371]
 
 
 @pytest.fixture(scope="session", autouse=True)

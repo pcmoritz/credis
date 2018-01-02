@@ -66,8 +66,8 @@ int MasterAdd_RedisCommand(RedisModuleCtx* ctx,
     SetRole(head.context, "head", "nil", "nil", address, port);
     SetRole(context, "tail", head.address, head.port, head.address, head.port);
   } else {
-    LOG(INFO) << "New tail node joined.";
-    LOG(INFO) << "Telling the old tail to be a middle node.";
+    LOG(INFO)
+        << "New tail node joined. Telling the old tail to be a middle node.";
     Member head = members[0];
     Member middle = members[size - 1];
     SetRole(middle.context, "middle", "", "", address, port);
@@ -114,32 +114,33 @@ int MasterRemove_RedisCommand(RedisModuleCtx* ctx,
     return RedisModule_ReplyWithError(ctx, "replica not found");
   }
 
-  if (index == members.size() - 1) {
-    LOG(INFO) << "Removing the tail.";
-    SetRole(members[index - 1].context, "tail", "nil", "nil",
-            members[0].address, members[0].port);
-  }
-
   members.erase(members.begin() + index);
 
-  if (index == 0) {
-    LOG(INFO) << "Removing the head.";
-    SetRole(members[0].context, "head", "nil", "nil", members[1].address,
-            members[1].port);
+  // Singleton case.
+  if (members.size() == 1) {
+    LOG(INFO) << "1 node left, setting it as SINGLETON.";
+    SetRole(members[0].context, "singleton", "nil", "nil", "nil", "nil");
+    return RedisModule_ReplyWithNull(ctx);
   }
 
-  if (index != 0 && index != members.size()) {
-    LOG(INFO) << "Removing the middle node " << index << ".";
-    long long sn =
+  // At least 2 nodes left.
+  if (index == members.size() - 1) {
+    LOG(INFO) << "Removed the tail.";
+    SetRole(members[index - 1].context, "tail", "nil", "nil",
+            members[0].address, members[0].port);
+  } else if (index == 0) {
+    LOG(INFO) << "Removed the head.";
+    SetRole(members[0].context, "head", "nil", "nil", members[1].address,
+            members[1].port);
+  } else {
+    LOG(INFO) << "Removed the middle node " << index << ".";
+    const long long sn =
         SetRole(members[index].context, "", members[index - 1].address,
                 members[index - 1].port, "", "");
     SetRole(members[index - 1].context, "", "", "", members[index].address,
             members[index].port, sn);
   }
-
-  RedisModule_ReplyWithNull(ctx);
-
-  return REDISMODULE_OK;
+  return RedisModule_ReplyWithNull(ctx);
 }
 
 // MASTER.REFRESH_HEAD: return the current head if non-faulty, otherwise
@@ -173,7 +174,8 @@ int MasterRefreshHead_RedisCommand(RedisModuleCtx* ctx,
   CHECK(members.size() >= 1 &&
         members.size() <= 2);  // TODO: implement adding a node?
   if (members.size() == 1) {
-    SetRole(members[0].context, "head", "nil", "nil", "nil", "nil");
+    LOG(INFO) << "SetRole(singleton)";
+    SetRole(members[0].context, "singleton", "nil", "nil", "nil", "nil");
   } else {
     LOG(INFO) << "SetRole(head)";
     SetRole(members[0].context, "head", /*prev addr and port*/ "nil", "nil",

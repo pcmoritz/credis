@@ -75,13 +75,24 @@ int HandleNonOk(RedisModuleCtx* ctx, Status s) {
 class RedisChainModule {
  public:
   enum class ChainRole : int {
-    kHead = 0,
-    kMiddle = 1,
-    kTail = 2,
+    // 1-node chain: serves reads and writes.
+    kSingleton = 0,
+    // Values below imply # nodes in chain > 1.
+    kHead = 1,
+    kMiddle = 2,
+    kTail = 3,
   };
+  bool ActAsHead() const {
+    return chain_role_ == ChainRole::kSingleton ||
+           chain_role_ == ChainRole::kHead;
+  }
+  bool ActAsTail() const {
+    return chain_role_ == ChainRole::kSingleton ||
+           chain_role_ == ChainRole::kTail;
+  }
 
   RedisChainModule()
-      : chain_role_(ChainRole::kHead), parent_(NULL), child_(NULL) {}
+      : chain_role_(ChainRole::kSingleton), parent_(NULL), child_(NULL) {}
 
   ~RedisChainModule() {
     if (child_) {
@@ -136,9 +147,12 @@ class RedisChainModule {
   void SetRole(ChainRole chain_role) { chain_role_ = chain_role; }
   ChainRole Role() const { return chain_role_; }
   constexpr const char* ChainRoleName() const {
-    return Role() == ChainRole::kHead
-               ? "HEAD"
-               : (Role() == ChainRole::kMiddle ? "MIDDLE" : "TAIL");
+    return chain_role_ == ChainRole::kSingleton
+               ? "SINGLETON"
+               : (chain_role_ == ChainRole::kHead
+                      ? "HEAD"
+                      : (chain_role_ == ChainRole::kMiddle ? "MIDDLE"
+                                                           : "TAIL"));
   }
 
   std::string prev_address() { return prev_address_; }
@@ -154,7 +168,7 @@ class RedisChainModule {
   std::map<int64_t, std::string>& sn_to_key() { return sn_to_key_; }
   int64_t sn() const { return sn_; }
   int64_t inc_sn() {
-    CHECK(chain_role_ == ChainRole::kHead)
+    CHECK(ActAsHead())
         << "Logical error?: only the head should increment the sn.";
     LOG(INFO) << "Using sequence number " << sn_ + 1;
     return ++sn_;
@@ -211,7 +225,7 @@ int Put(RedisModuleCtx* ctx,
     RedisModule_DeleteKey(key);
     module.sn_to_key().erase(sn);
     // The tail has the responsibility of updating the sn_flushed watermark.
-    if (module.Role() == RedisChainModule::ChainRole::kTail) {
+    if (module.ActAsTail()) {
       // "sn + 1" is the next sn to be flushed.
       module.Master().SetWatermark(MasterClient::Watermark::kSnFlushed, sn + 1);
     }
@@ -223,7 +237,7 @@ int Put(RedisModuleCtx* ctx,
 
   // Protocol.
   std::string seqnum = std::to_string(sn);
-  if (module.Role() == RedisChainModule::ChainRole::kTail) {
+  if (module.ActAsTail()) {
     RedisModuleCallReply* reply =
         RedisModule_Call(ctx, "PUBLISH", "cc", "answers", seqnum.c_str());
     if (RedisModule_CallReplyType(reply) == REDISMODULE_REPLY_ERROR) {
@@ -249,9 +263,9 @@ int Put(RedisModuleCtx* ctx,
   return REDISMODULE_OK;
 }
 
-// Set the role (head, middle, tail), successor and predecessor of this server.
+// Set the role, successor and predecessor of this server.
 // Each of the arguments can be the empty string, in which case it is not set.
-// argv[1] is the role of this instance ("head", "middle", "tail")
+// argv[1] is the role of this instance ("singleton", "head", "middle", "tail")
 // argv[2] is the address of the previous node in the chain
 // argv[3] is the port of the previous node in the chain
 // argv[4] is the address of the next node in the chain
@@ -266,14 +280,16 @@ int MemberSetRole_RedisCommand(RedisModuleCtx* ctx,
     return RedisModule_WrongArity(ctx);
   }
   std::string role = ReadString(argv[1]);
-  if (role == "head") {
+  if (role == "singleton") {
+    module.SetRole(RedisChainModule::ChainRole::kSingleton);
+  } else if (role == "head") {
     module.SetRole(RedisChainModule::ChainRole::kHead);
   } else if (role == "middle") {
     module.SetRole(RedisChainModule::ChainRole::kMiddle);
   } else if (role == "tail") {
     module.SetRole(RedisChainModule::ChainRole::kTail);
   } else {
-    assert(role == "");
+    CHECK(role == "");
   }
 
   std::string prev_address = ReadString(argv[2]);
@@ -353,7 +369,7 @@ int MemberPut_RedisCommand(RedisModuleCtx* ctx,
   if (argc != 3) {
     return RedisModule_WrongArity(ctx);
   }
-  if (module.Role() == RedisChainModule::ChainRole::kHead) {
+  if (module.ActAsHead()) {
     long long sn = module.inc_sn();
     return Put(ctx, argv[1], argv[2], sn, /*is_flush=*/false);
   } else {
@@ -436,7 +452,7 @@ int TailCheckpoint_RedisCommand(RedisModuleCtx* ctx,
   if (argc != 1) {  // No arg needed.
     return RedisModule_WrongArity(ctx);
   }
-  if (module.Role() != RedisChainModule::ChainRole::kTail) {
+  if (!module.ActAsTail()) {
     return RedisModule_ReplyWithError(
         ctx, "ERR this command must be called on the tail.");
   }
@@ -501,7 +517,7 @@ int HeadFlush_RedisCommand(RedisModuleCtx* ctx,
   if (argc != 1) {  // No arg needed.
     return RedisModule_WrongArity(ctx);
   }
-  if (module.Role() != RedisChainModule::ChainRole::kHead) {
+  if (!module.ActAsHead()) {
     return RedisModule_ReplyWithError(
         ctx, "ERR this command must be called on the head.");
   }
@@ -571,7 +587,7 @@ int Read_RedisCommand(RedisModuleCtx* ctx, RedisModuleString** argv, int argc) {
   if (argc != 2) {
     return RedisModule_WrongArity(ctx);
   }
-  if (module.Role() != RedisChainModule::ChainRole::kTail) {
+  if (!module.ActAsTail()) {
     return RedisModule_ReplyWithError(
         ctx, "ERR this command must be called on the tail.");
   }
