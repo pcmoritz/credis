@@ -30,17 +30,46 @@ long long SetRole(redisContext* context,
                   const std::string& prev_port,
                   const std::string& next_address,
                   const std::string& next_port,
-                  long long sn = -1) {
-  std::string sn_string = std::to_string(sn);
-  redisReply* reply = reinterpret_cast<redisReply*>(
-      redisCommand(context, "MEMBER.SET_ROLE %s %s %s %s %s %s", role.c_str(),
-                   prev_address.c_str(), prev_port.c_str(),
-                   next_address.c_str(), next_port.c_str(), sn_string.c_str()));
-  LOG(INFO) << "Last sequence number is " << reply->integer;
-  const long long sn_result = reply->integer;
-  freeReplyObject(reply);
-  return sn_result;
+                  long long sn = -1,
+                  long long drop_writes = 0) {
+  const std::string sn_string = std::to_string(sn);
+  const std::string drop_writes_string = std::to_string(drop_writes);
+  if (!context->err) {
+    redisReply* reply = reinterpret_cast<redisReply*>(redisCommand(
+        context, "MEMBER.SET_ROLE %s %s %s %s %s %s %s", role.c_str(),
+        prev_address.c_str(), prev_port.c_str(), next_address.c_str(),
+        next_port.c_str(), sn_string.c_str(), drop_writes_string.c_str()));
+    CHECK(reply != NULL);
+    // TODO(zongheng): check error.
+    LOG(INFO) << "Last sequence number is " << reply->integer;
+    const long long sn_result = reply->integer;
+    freeReplyObject(reply);
+    return sn_result;
+  } else {
+    LOG(INFO) << "ERROR: SetRole() cannot contact remote node, returning -1";
+    LOG(INFO) << "error string: " << std::string(context->errstr);
+    return -1;
+  }
 }
+
+// Handling node addition at the end of chain.
+//
+// We follow the protocol outlined at the end of Section 3 of the paper.
+// However, currently we drop the optimization that old tail concurrently
+// process reads/writes while the state transfer is underway.  Here's the
+// variant:
+//
+// MasterAdd()
+//    (1) SetRole(old_tail, new_role=MIDDLE, next=new_tail, drop_writes=True)
+//        i.e., old_tail.MemberSetRole()
+//    (2) old_tail.MemberReplicate()
+//    (3) SetRole(new_tail, new_role=TAIL, prev=old_tail)
+//        i.e., new_tail.MemberSetRole()
+//    (4) old_tail.UnblockWrites()
+//
+// After (1), the old tail will drop all write requests, and reads will fail
+// too due to the role change.   Completion of (4) let new write requests flow
+// through again, and free up the master to handle RefreshTail from the clients.
 
 // Add a new replica to the chain
 // argv[1] is the IP address of the replica to be added
@@ -52,40 +81,49 @@ int MasterAdd_RedisCommand(RedisModuleCtx* ctx,
     return RedisModule_WrongArity(ctx);
   }
 
-  std::string address = ReadString(argv[1]);
-  std::string port = ReadString(argv[2]);
+  const std::string address = ReadString(argv[1]);
+  const std::string port = ReadString(argv[2]);
 
   const size_t size = members.size();
   redisContext* context = SyncConnect(address, std::stoi(port));
-
   if (size == 0) {
-    LOG(INFO) << "Node joined as a new head.";
-  } else if (size == 1) {
-    LOG(INFO) << "First tail joined. Now also connecting the first head.";
-    Member head = members[0];
-    SetRole(head.context, "head", "nil", "nil", address, port);
-    SetRole(context, "tail", head.address, head.port, head.address, head.port);
+    LOG(INFO) << "First node joined.";
+    // Fall through.
   } else {
-    LOG(INFO)
-        << "New tail node joined. Telling the old tail to be a middle node.";
-    Member head = members[0];
-    Member middle = members[size - 1];
-    SetRole(middle.context, "middle", "", "", address, port);
+    LOG(INFO) << "New tail node joined.";
+    const Member old_tail = members[size - 1];
+    if (size > 1) {
+      SetRole(old_tail.context, "middle",
+              /*re-use cached prev addr and port*/ "", "",
+              /*next addr and port*/ address, port, /*sn=*/-1,
+              /*drop_writes=*/1);
+    } else {
+      SetRole(old_tail.context, "head",
+              /*prev addr and port*/ "nil", "nil",
+              /*next addr and port*/ address, port, /*sn=*/-1,
+              /*drop_writes=*/1);
+    }
+    // TODO(zongheng): below, "reply" needs to be checked.
+    // TODO(pcm): Execute Sent_T requests
     LOG(INFO) << "Replicating the tail.";
     redisReply* reply = reinterpret_cast<redisReply*>(
-        redisCommand(middle.context, "MEMBER.REPLICATE"));
+        redisCommand(old_tail.context, "MEMBER.REPLICATE"));
     freeReplyObject(reply);
-    // TODO(pcm): Execute Sent_T requests
+
     LOG(INFO) << "Setting new tail.";
-    SetRole(context, "tail", middle.address, middle.port, "nil", "nil");
+    SetRole(context, "tail", old_tail.address, old_tail.port, "nil", "nil");
+
+    // Let writes flow through.
+    reply = reinterpret_cast<redisReply*>(
+        redisCommand(old_tail.context, "MEMBER.UNBLOCK_WRITES"));
+    freeReplyObject(reply);
   }
   Member tail;
   tail.address = address;
   tail.port = port;
   tail.context = context;
   members.emplace_back(tail);
-  RedisModule_ReplyWithNull(ctx);
-  return REDISMODULE_OK;
+  return RedisModule_ReplyWithNull(ctx);
 }
 
 // Remove a replica from the chain

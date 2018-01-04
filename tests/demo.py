@@ -54,8 +54,8 @@ def Put(i):
     good_client = False
     for k in range(3):  # Try 3 times.
         try:
-            if k > 0:
-                print('k %d pubsub %s' % (k, ack_pubsub.connection))
+            # if k > 0:
+            print('k %d pubsub %s' % (k, ack_pubsub.connection))
             # NOTE(zongheng): 1e-4 seems insufficient for an ACK to be
             # delivered back.  1e-3 has the issue of triggering a retry, but
             # then receives an ACK for the old sn (an issue clients will need
@@ -75,12 +75,15 @@ def Put(i):
         # likely ignored by the store).  Retry.
         fails_since_last_success += 1
         if fails_since_last_success >= max_fails:
-            raise Exception("A maximum of %d update attempts have failed; "
-                            "no acks from the store are received. i = %d" %
-                            (max_fails, i))
-        print(
-            "%d updates have been ignored since last success, retrying Put(%d)"
-            % (fails_since_last_success, i))
+            raise Exception(
+                "A maximum of %d update attempts have failed; "
+                "no acks from the store are received. i = %d, client = %s" %
+                (max_fails, i, ack_pubsub.connection))
+        _, ack_pubsub = RefreshTailFromMaster(master_client)
+        print("%d updates have been ignored since last success, "
+              "retrying Put(%d) with fresh ack client %s" %
+              (fails_since_last_success, i, ack_pubsub.connection))
+        time.sleep(0.01)
         Put(i)
     else:
         # TODO(zongheng): this is a stringent check.  See NOTE above: sometimes
@@ -96,7 +99,7 @@ def SeqPut(n, ops_completed):
 
     latencies = []
     for i in range(n):
-        # print('i %d' % i)
+        print('i %d' % i)
         start = time.time()
         Put(i)  # i -> i
         latencies.append((time.time() - start) * 1e6)  # Microsecs.
@@ -119,17 +122,28 @@ def CheckSeqRead(n):
 
 def test_demo():
     # Launch driver thread.
-    n = 100
+    n = 1000
     ops_completed = multiprocessing.Value('i', 0)
     driver = multiprocessing.Process(target=SeqPut, args=(n, ops_completed))
     driver.start()
 
-    # TODO(zongheng): when killing middle, program hangs somewhere.
-    # Kill.
+    # TODO(zongheng): AddNode() should always append new port to PORTS?
+    # Kill / add.
+    new_nodes = []
     time.sleep(0.1)
+    # time.sleep(0.1)
     common.KillNode(index=1)
+    new_nodes.append(common.AddNode(master_client))
+    new_nodes.append(common.AddNode(master_client))
+    # new_nodes.append(common.AddNode(master_client))
+    # new_nodes.append(common.AddNode(master_client))
+    # print("Added new server with port %d" % new_nodes[-1][1])
 
     driver.join()
-    CheckSeqRead(ops_completed.value)
-    print('Total ops %d, completed ops %d' % (n, ops_completed.value))
     assert ops_completed.value == n
+    CheckSeqRead(ops_completed.value)
+
+    for proc, _ in new_nodes:
+        proc.kill()
+
+    print('Total ops %d, completed ops %d' % (n, ops_completed.value))

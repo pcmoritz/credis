@@ -15,6 +15,43 @@ PORTS = [6369, 6370, 6371, 6372]
 # latency (us): mean 1620.17155 std 334.57320 num 2000
 PORTS = [6369, 6370, 6371]
 
+MAX_USED_PORT = None  # For picking the next port.
+
+
+def KillNode(index):
+    assert index >= 0 and index < len(
+        PORTS) - 1, "index %d num_chain_nodes %d" % (index, len(PORTS) - 1)
+    assert index == 0 or index == len(
+        PORTS) - 2, "middle node failure is not handled, index %d, len %d" % (
+            index, len(PORTS))
+    port_to_kill = PORTS[index + 1]
+    print('killing port %d' % port_to_kill)
+    subprocess.check_output(["pkill", "-9", "redis-server.*:%s" % port_to_kill])
+    del PORTS[index + 1]
+
+
+def AddNode(master_client, port=None):
+    global MAX_USED_PORT
+    if port is not None:
+        MAX_USED_PORT = port if MAX_USED_PORT is None else max(
+            MAX_USED_PORT, port)
+        new_port = port
+    else:
+        new_port = MAX_USED_PORT + 1
+        MAX_USED_PORT += 1
+    print('launching redis-server --port %d' % new_port)
+    member = subprocess.Popen([
+        "redis/src/redis-server", "--loadmodule", "build/src/libmember.so",
+        "--port",
+        str(new_port)
+    ])
+    time.sleep(0.1)
+    print('calling master add, new_port %s' % new_port)
+    master_client.execute_command("MASTER.ADD", "127.0.0.1", str(new_port))
+    if port is None:
+        PORTS.append(new_port)
+    return member, new_port
+
 
 @pytest.fixture(scope="session", autouse=True)
 def startcredis(request):
@@ -25,19 +62,11 @@ def startcredis(request):
         str(PORTS[0])
     ])
     request.addfinalizer(master.kill)
-
-    for port in PORTS[1:]:
-        member = subprocess.Popen([
-            "redis/src/redis-server", "--loadmodule", "build/src/libmember.so",
-            "--port",
-            str(port)
-        ])
-        request.addfinalizer(member.kill)
-    time.sleep(2.0)
-
     master_client = redis.StrictRedis("127.0.0.1", PORTS[0])
+
     for port in PORTS[1:]:
-        master_client.execute_command("MASTER.ADD", "127.0.0.1", str(port))
+        member, _ = AddNode(master_client, port)
+        request.addfinalizer(member.kill)
 
 
 def AckClient():
@@ -64,6 +93,7 @@ def GetHeadFromMaster(master_client):
 
 
 def RefreshHeadFromMaster(master_client):
+    print('calling MASTER.REFRESH_HEAD')
     head_addr_port = master_client.execute_command("MASTER.REFRESH_HEAD")
     print('head_addr_port: %s' % head_addr_port)
     splits = head_addr_port.split(b':')
@@ -77,12 +107,3 @@ def RefreshTailFromMaster(master_client):
     splits = tail_addr_port.split(b':')
     c = redis.StrictRedis(splits[0], int(splits[1]))
     return AckClientAndPubsub(c)
-
-
-def KillNode(index):
-    assert index >= 0 and index < len(
-        PORTS) - 1, "index %d num_chain_nodes %d" % (index, len(PORTS) - 1)
-    port_to_kill = PORTS[index + 1]
-    print('killing port %d' % port_to_kill)
-    subprocess.check_output(["pkill", "redis-server.*:%s" % port_to_kill])
-    del PORTS[index + 1]

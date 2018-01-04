@@ -44,16 +44,19 @@ using Status = leveldb::Status;  // So that it can be easily replaced.
 
 namespace {
 
-// void DisconnectCallback(const redisAsyncContext* c, int status) {
-//   LOG(INFO) << "Disconnect status " << status;
-//   // Error codes are defined in read.h under hiredis.
-//   LOG(INFO) << "c->err " << c->err;
-//   LOG(INFO) << "c->errstr " << std::string(c->errstr);
-//   // "c" will be freed by hiredis.  Quote: "The context object is always
-//   freed
-//   // after the disconnect callback fired. When a reconnect is needed, the
-//   // disconnect callback is a good point to do so."
-// }
+// Register this so that on disconnect, the respective redisAsyncContext will be
+// timely freed by hiredis.  Otherwise non-deterministic crashes happen on next
+// redisAsyncCommand() call.
+void DisconnectCallback(const redisAsyncContext* c, int status) {
+  LOG(INFO) << "Disconnect status " << status;
+  // Error codes are defined in read.h under hiredis.
+  LOG(INFO) << "c->err " << c->err;
+  LOG(INFO) << "c->errstr " << std::string(c->errstr);
+  LOG(INFO) << "c->c.tcp.port " << c->c.tcp.port;
+
+  // "c" will be freed by hiredis.  Quote: "The context object is always freed
+  // after the disconnect callback fired."
+}
 
 redisAsyncContext* AsyncConnect(const std::string& address, int port) {
   redisAsyncContext* c = redisAsyncConnect(address.c_str(), port);
@@ -66,7 +69,7 @@ redisAsyncContext* AsyncConnect(const std::string& address, int port) {
     }
     exit(1);
   }
-  // redisAsyncSetDisconnectCallback(c, &DisconnectCallback);
+  redisAsyncSetDisconnectCallback(c, &DisconnectCallback);
   return c;
 }
 
@@ -104,9 +107,8 @@ class RedisChainModule {
       : chain_role_(ChainRole::kSingleton), parent_(NULL), child_(NULL) {}
 
   ~RedisChainModule() {
-    if (child_) {
-      redisAsyncFree(child_);
-    }
+    if (child_) redisAsyncFree(child_);
+    if (parent_) redisAsyncFree(parent_);
   }
 
   void Reset(std::string& prev_address,
@@ -118,17 +120,13 @@ class RedisChainModule {
     next_address_ = next_address;
     next_port_ = next_port;
 
-    if (child_) {
-      if (!child_->err) {
-        // A weird behavior is that when "err" is present (which likely
-        // indicates a remote crash), redisAsyncFree() crashes.  Same below.
-        redisAsyncFree(child_);
-      }
+    // If "c->err" is present, the disconnect callback should've already free'd
+    // the async context.
+    if (child_ && !child_->err) {
+      redisAsyncDisconnect(child_);
     }
-    if (parent_) {
-      if (!parent_->err) {
-        redisAsyncFree(parent_);
-      }
+    if (parent_ && !parent_->err) {
+      redisAsyncDisconnect(parent_);
     }
     if (next_address != "nil") {
       child_ = AsyncConnect(next_address, std::stoi(next_port));
@@ -184,6 +182,9 @@ class RedisChainModule {
   }
   void record_sn(int64_t sn) { sn_ = std::max(sn_, sn); }
 
+  bool DropWrites() const { return drop_writes_; }
+  void SetDropWrites(bool b) { drop_writes_ = b; }
+
  private:
   std::string prev_address_;
   std::string prev_port_;
@@ -206,6 +207,9 @@ class RedisChainModule {
   std::set<int64_t> sent_;
   // For implementing checkpointing.
   std::map<int64_t, std::string> sn_to_key_;
+
+  // Drop writes.  Used when adding a child which acts as the new tail.
+  bool drop_writes_ = false;
 };
 
 RedisChainModule module;
@@ -226,7 +230,7 @@ int Put(RedisModuleCtx* ctx,
         bool is_flush) {
   RedisModuleKey* key = reinterpret_cast<RedisModuleKey*>(
       RedisModule_OpenKey(ctx, name, REDISMODULE_WRITE));
-  std::string k = ReadString(name);
+  const std::string k = ReadString(name);
   // TODO(pcm): error checking
 
   // State maintenance.
@@ -245,7 +249,7 @@ int Put(RedisModuleCtx* ctx,
   }
 
   // Protocol.
-  std::string seqnum = std::to_string(sn);
+  const std::string seqnum = std::to_string(sn);
   if (module.ActAsTail()) {
     RedisModuleCallReply* reply =
         RedisModule_Call(ctx, "PUBLISH", "cc", "answers", seqnum.c_str());
@@ -262,8 +266,8 @@ int Put(RedisModuleCtx* ctx,
     // crashed before the call, this function non-deterministically crashes
     // with, say, a single digit percent chance.  We guard against this by
     // testing the "err" field first.
+    LOG(INFO) << "Calling MemberPropagate_RedisCommand";
     if (!module.child()->err) {
-      LOG(INFO) << "Calling MemberPropagate_RedisCommand";
       const int status = redisAsyncCommand(
           module.child(), NULL, NULL, "MEMBER.PROPAGATE %b %b %b %s", k.data(),
           k.size(), v.data(), v.size(), seqnum.data(), seqnum.size(),
@@ -292,11 +296,12 @@ int Put(RedisModuleCtx* ctx,
 // argv[5] is the port of the next node in the chain
 // argv[6] is the last sequence number the next node did receive
 // (on node removal) and -1 if no node is removed
+// argv[7]: drop_writes?
 // Returns the latest sequence number on this node
 int MemberSetRole_RedisCommand(RedisModuleCtx* ctx,
                                RedisModuleString** argv,
                                int argc) {
-  if (argc != 7) {
+  if (argc != 8) {
     return RedisModule_WrongArity(ctx);
   }
   std::string role = ReadString(argv[1]);
@@ -332,29 +337,37 @@ int MemberSetRole_RedisCommand(RedisModuleCtx* ctx,
   module.Reset(prev_address, prev_port, next_address, next_port);
 
   if (module.child()) {
+    CHECK(!module.child()->err);
     aeEventLoop* loop = getEventLoop();
     redisAeAttach(loop, module.child());
   }
 
   if (module.parent()) {
+    CHECK(!module.parent()->err);
     aeEventLoop* loop = getEventLoop();
     redisAeAttach(loop, module.parent());
   }
 
-  int64_t first_sn = std::stoi(ReadString(argv[6]));
+  const int64_t first_sn = std::stoi(ReadString(argv[6]));
+  const bool drop_writes = std::stoi(ReadString(argv[7])) ? true : false;
+  if (drop_writes) module.SetDropWrites(drop_writes);
 
-  for (auto i = module.sn_to_key().find(first_sn);
-       i != module.sn_to_key().end(); ++i) {
-    std::string sn = std::to_string(i->first);
-    std::string key = i->second;
-    KeyReader reader(ctx, key);
-    size_t size;
-    const char* value = reader.value(&size);
-    const int status = redisAsyncCommand(
-        module.child(), NULL, NULL, "MEMBER.PROPAGATE %b %b %b %s", key.data(),
-        key.size(), value, size, sn.data(), sn.size(),
-        /*is_flush=*/kStringZero);
-    // TODO(zongheng): check status.
+  if (module.child()) {
+    for (auto i = module.sn_to_key().find(first_sn);
+         i != module.sn_to_key().end(); ++i) {
+      std::string sn = std::to_string(i->first);
+      std::string key = i->second;
+      KeyReader reader(ctx, key);
+      size_t size;
+      const char* value = reader.value(&size);
+      if (!module.child()->err) {
+        const int status = redisAsyncCommand(
+            module.child(), NULL, NULL, "MEMBER.PROPAGATE %b %b %b %s",
+            key.data(), key.size(), value, size, sn.data(), sn.size(),
+            /*is_flush=*/kStringZero);
+        // TODO(zongheng): check status.
+      }
+    }
   }
 
   LOG(INFO) << "Called SET_ROLE with role " << module.ChainRoleName()
@@ -390,8 +403,15 @@ int MemberPut_RedisCommand(RedisModuleCtx* ctx,
     return RedisModule_WrongArity(ctx);
   }
   if (module.ActAsHead()) {
-    long long sn = module.inc_sn();
-    return Put(ctx, argv[1], argv[2], sn, /*is_flush=*/false);
+    if (!module.DropWrites()) {
+      const long long sn = module.inc_sn();
+      return Put(ctx, argv[1], argv[2], sn, /*is_flush=*/false);
+    } else {
+      // The store, by contract, is allowed to ignore writes during faults.
+      return RedisModule_ReplyWithNull(ctx);
+      // return RedisModule_ReplyWithError(
+      //     ctx, "Server set to drop_writes mode, retry?");
+    }
   } else {
     return RedisModule_ReplyWithError(ctx, "ERR called PUT on non-head node");
   }
@@ -408,13 +428,23 @@ int MemberPropagate_RedisCommand(RedisModuleCtx* ctx,
   if (argc != 5) {
     return RedisModule_WrongArity(ctx);
   }
-  long long sn = -1, is_flush = 0;
-  RedisModule_StringToLongLong(argv[3], &sn);
-  RedisModule_StringToLongLong(argv[4], &is_flush);
-  return Put(ctx, argv[1], argv[2], sn, is_flush == 0 ? false : true);
+  if (!module.DropWrites()) {
+    long long sn = -1, is_flush = 0;
+    RedisModule_StringToLongLong(argv[3], &sn);
+    RedisModule_StringToLongLong(argv[4], &is_flush);
+    return Put(ctx, argv[1], argv[2], sn, is_flush == 0 ? false : true);
+  } else {
+    // The store, by contract, is allowed to ignore writes during faults.
+    return RedisModule_ReplyWithNull(ctx);
+    // return RedisModule_ReplyWithError(ctx,
+    //                                   "Server set to drop_writes mode,
+    //                                   retry?");
+  }
 }
 
 // Replicate our content to our child
+// NOTE: with Sent_T handling this can be asynchronous (in the tail-add path);
+// however without handling Sent_T this function should probably be synchronous.
 int MemberReplicate_RedisCommand(RedisModuleCtx* ctx,
                                  RedisModuleString** argv,
                                  int argc) {
@@ -422,18 +452,27 @@ int MemberReplicate_RedisCommand(RedisModuleCtx* ctx,
   if (argc != 1) {
     return RedisModule_WrongArity(ctx);
   }
-  LOG(INFO) << "Called replicate.";
-  for (auto element : module.sn_to_key()) {
-    KeyReader reader(ctx, element.second);
-    size_t key_size, value_size;
-    const char* key_data = reader.key(&key_size);
-    const char* value_data = reader.value(&value_size);
-    const int status =
-        redisAsyncCommand(module.child(), NULL, NULL, "SET %b %b", key_data,
-                          key_size, value_data, value_size);
-    // TODO(zongheng): check status.
+
+  if (module.child()) {
+    LOG(INFO) << "Called replicate.";
+    for (auto element : module.sn_to_key()) {
+      KeyReader reader(ctx, element.second);
+      size_t key_size, value_size;
+      const char* key_data = reader.key(&key_size);
+      const char* value_data = reader.value(&value_size);
+      if (!module.child()->err) {
+        const int status =
+            redisAsyncCommand(module.child(), NULL, NULL, "SET %b %b", key_data,
+                              key_size, value_data, value_size);
+        // TODO(zongheng): check status.
+      } else {
+        LOG(INFO) << "Child dead, waiting for master to intervene.";
+        LOG(INFO) << "Redis context error: '"
+                  << std::string(module.child()->errstr) << "'.";
+      }
+    }
+    LOG(INFO) << "Done replicating.";
   }
-  LOG(INFO) << "Done replicating.";
   RedisModule_ReplyWithNull(ctx);
   return REDISMODULE_OK;
 }
@@ -458,6 +497,17 @@ int MemberAck_RedisCommand(RedisModuleCtx* ctx,
   }
   RedisModule_ReplyWithNull(ctx);
   return REDISMODULE_OK;
+}
+
+// Let new writes flow through.
+// Used in the node addition code path (see MASTER.ADD).
+int MemberUnblockWrites_RedisCommand(RedisModuleCtx* ctx,
+                                     RedisModuleString** argv,
+                                     int argc) {
+  REDISMODULE_NOT_USED(argv);
+  if (argc != 1) return RedisModule_WrongArity(ctx);
+  module.SetDropWrites(false);
+  return RedisModule_ReplyWithNull(ctx);
 }
 
 // TAIL.CHECKPOINT: incrementally checkpoint in-memory entries to durable
@@ -693,6 +743,12 @@ int RedisModule_OnLoad(RedisModuleCtx* ctx,
 
   if (RedisModule_CreateCommand(ctx, "MEMBER.ACK", MemberAck_RedisCommand,
                                 "write pubsub", 1, 1, 1) == REDISMODULE_ERR) {
+    return REDISMODULE_ERR;
+  }
+  if (RedisModule_CreateCommand(ctx, "MEMBER.UNBLOCK_WRITES",
+                                MemberUnblockWrites_RedisCommand, "write",
+                                /*firstkey=*/-1, /*lastkey=*/-1,
+                                /*keystep=*/0) == REDISMODULE_ERR) {
     return REDISMODULE_ERR;
   }
 
