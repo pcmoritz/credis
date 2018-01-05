@@ -15,19 +15,27 @@ PORTS = [6369, 6370, 6371, 6372]
 # latency (us): mean 1620.17155 std 334.57320 num 2000
 PORTS = [6369, 6370, 6371]
 
-MAX_USED_PORT = None  # For picking the next port.
+MAX_USED_PORT = max(PORTS)  # For picking the next port.
 
 
-def KillNode(index):
-    assert index >= 0 and index < len(
-        PORTS) - 1, "index %d num_chain_nodes %d" % (index, len(PORTS) - 1)
-    assert index == 0 or index == len(
-        PORTS) - 2, "middle node failure is not handled, index %d, len %d" % (
-            index, len(PORTS))
-    port_to_kill = PORTS[index + 1]
+def KillNode(index=None, port=None):
+    assert index is not None or port is not None
+    if port is None:
+        assert index >= 0 and index < len(
+            PORTS) - 1, "index %d num_chain_nodes %d" % (index, len(PORTS) - 1)
+        assert index == 0 or index == len(
+            PORTS) - 2, "middle node failure is not handled, index %d, len %d" % (
+                index, len(PORTS))
+        port_to_kill = PORTS[index + 1]
+    else:
+        port_to_kill = port
     print('killing port %d' % port_to_kill)
-    subprocess.check_output(["pkill", "-9", "redis-server.*:%s" % port_to_kill])
-    del PORTS[index + 1]
+    subprocess.check_output(
+        ["pkill", "-9", "redis-server.*:%s" % port_to_kill])
+    if port is None:
+        del PORTS[index + 1]
+    # else:
+    #     del PORTS[PORTS.index(port)]
 
 
 def AddNode(master_client, port=None):
@@ -53,20 +61,27 @@ def AddNode(master_client, port=None):
     return member, new_port
 
 
-@pytest.fixture(scope="session", autouse=True)
-def startcredis(request):
+def Start(request=None):
+    subprocess.Popen(["pkill", "-9", "redis-server.*"]).wait()
     assert len(PORTS) > 1, "At least 1 master and 1 chain node"
     master = subprocess.Popen([
         "redis/src/redis-server", "--loadmodule", "build/src/libmaster.so",
         "--port",
         str(PORTS[0])
     ])
-    request.addfinalizer(master.kill)
+    if request is not None:
+        request.addfinalizer(master.kill)
     master_client = redis.StrictRedis("127.0.0.1", PORTS[0])
 
     for port in PORTS[1:]:
         member, _ = AddNode(master_client, port)
-        request.addfinalizer(member.kill)
+        if request is not None:
+            request.addfinalizer(member.kill)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def startcredis(request):
+    Start(request)
 
 
 def AckClient():

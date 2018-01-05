@@ -3,9 +3,9 @@ import time
 
 import numpy as np
 
-import common
 import redis
-from common import *
+from tests import common
+from tests.common import *
 
 ack_client = AckClient()
 master_client = MasterClient()
@@ -15,6 +15,7 @@ act_pubsub = None
 # Put() ops can be ignored when failures occur on the servers.  Try a few times.
 fails_since_last_success = 0
 max_fails = 3
+ops_completed = multiprocessing.Value('i', 0)
 
 
 # From redis-py/.../test_pubsub.py.
@@ -55,7 +56,7 @@ def Put(i):
     for k in range(3):  # Try 3 times.
         try:
             # if k > 0:
-            print('k %d pubsub %s' % (k, ack_pubsub.connection))
+            # print('k %d pubsub %s' % (k, ack_pubsub.connection))
             # NOTE(zongheng): 1e-4 seems insufficient for an ACK to be
             # delivered back.  1e-3 has the issue of triggering a retry, but
             # then receives an ACK for the old sn (an issue clients will need
@@ -83,7 +84,7 @@ def Put(i):
         print("%d updates have been ignored since last success, "
               "retrying Put(%d) with fresh ack client %s" %
               (fails_since_last_success, i, ack_pubsub.connection))
-        time.sleep(0.01)
+        time.sleep(1)
         Put(i)
     else:
         # TODO(zongheng): this is a stringent check.  See NOTE above: sometimes
@@ -92,14 +93,16 @@ def Put(i):
         fails_since_last_success = 0
 
 
-def SeqPut(n, ops_completed):
+def SeqPut(n):
     """For i in range(n), sequentially put i->i into redis."""
     global ack_pubsub
+    global ops_completed
     _, ack_pubsub = AckClientAndPubsub(ack_client)
 
     latencies = []
     for i in range(n):
-        print('i %d' % i)
+        # if i % 50 == 0:
+        #     print('i = %d' % i)
         start = time.time()
         Put(i)  # i -> i
         latencies.append((time.time() - start) * 1e6)  # Microsecs.
@@ -112,19 +115,20 @@ def SeqPut(n, ops_completed):
 
 
 # Asserts that the redis state is exactly {i -> i | i in [0, n)}.
-def CheckSeqRead(n):
-    read_client = RefreshHeadFromMaster(master_client)
-    assert len(read_client.keys(b'*')) == n
+def Check(n):
+    read_client, _ = RefreshTailFromMaster(master_client)
+    actual = len(read_client.keys(b'*'))
+    assert actual == n, "Written %d Expected %d" % (actual, n)
     for i in range(n):
         data = read_client.get(str(i))
-        assert int(data) == i
+        assert int(data) == i, i
 
 
 def test_demo():
     # Launch driver thread.
+    time.sleep(0.1)
     n = 1000
-    ops_completed = multiprocessing.Value('i', 0)
-    driver = multiprocessing.Process(target=SeqPut, args=(n, ops_completed))
+    driver = multiprocessing.Process(target=SeqPut, args=(n, ))
     driver.start()
 
     # TODO(zongheng): AddNode() should always append new port to PORTS?
@@ -134,14 +138,14 @@ def test_demo():
     # time.sleep(0.1)
     common.KillNode(index=1)
     new_nodes.append(common.AddNode(master_client))
-    new_nodes.append(common.AddNode(master_client))
+    # new_nodes.append(common.AddNode(master_client))
     # new_nodes.append(common.AddNode(master_client))
     # new_nodes.append(common.AddNode(master_client))
     # print("Added new server with port %d" % new_nodes[-1][1])
 
     driver.join()
     assert ops_completed.value == n
-    CheckSeqRead(ops_completed.value)
+    Check(ops_completed.value)
 
     for proc, _ in new_nodes:
         proc.kill()
