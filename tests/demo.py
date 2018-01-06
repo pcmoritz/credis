@@ -234,3 +234,7 @@ def test_dead_old_tail_when_adding():
     Check(ops_completed.value)
 
     proc.kill()
+
+
+if __name__ == '__main__':
+    assert False
