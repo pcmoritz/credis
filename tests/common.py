@@ -6,39 +6,38 @@ import pytest
 import redis
 
 # Ports, in the order of [master; replicas in chain].
+INIT_PORTS = [6369, 6370]
+INIT_PORTS = [6369, 6370, 6371, 6372]
+INIT_PORTS = [6369, 6370, 6371]
 
-PORTS = [6369, 6370]
-# SeqPut
-# latency (us): mean 1716.46547 std 435.77646 num 2000
-PORTS = [6369, 6370, 6371, 6372]
-# SeqPut
-# latency (us): mean 1620.17155 std 334.57320 num 2000
-PORTS = [6369, 6370, 6371]
-
+PORTS = list(INIT_PORTS)
 MAX_USED_PORT = max(PORTS)  # For picking the next port.
 
 
 def KillNode(index=None, port=None):
+    global PORTS
     assert index is not None or port is not None
     if port is None:
         assert index >= 0 and index < len(
             PORTS) - 1, "index %d num_chain_nodes %d" % (index, len(PORTS) - 1)
         assert index == 0 or index == len(
-            PORTS) - 2, "middle node failure is not handled, index %d, len %d" % (
-                index, len(PORTS))
+            PORTS
+        ) - 2, "middle node failure is not handled, index %d, len %d" % (
+            index, len(PORTS))
         port_to_kill = PORTS[index + 1]
     else:
         port_to_kill = port
     print('killing port %d' % port_to_kill)
     subprocess.check_output(
         ["pkill", "-9", "redis-server.*:%s" % port_to_kill])
-    # if port is None:
-    #     del PORTS[index + 1]
-    # else:
-    #     del PORTS[PORTS.index(port)]
+    if port is None:
+        del PORTS[index + 1]
+    else:
+        del PORTS[PORTS.index(port)]
 
 
 def AddNode(master_client, port=None):
+    global PORTS
     global MAX_USED_PORT
     if port is not None:
         MAX_USED_PORT = port if MAX_USED_PORT is None else max(
@@ -56,14 +55,20 @@ def AddNode(master_client, port=None):
     time.sleep(0.1)
     print('calling master add, new_port %s' % new_port)
     master_client.execute_command("MASTER.ADD", "127.0.0.1", str(new_port))
-    # if port is None:
-    #     PORTS.append(new_port)
+    if port is None:
+        PORTS.append(new_port)
     return member, new_port
 
 
 def Start(request=None):
-    subprocess.Popen(["pkill", "-9", "redis-server.*"]).wait()
+    global PORTS
+    global MAX_USED_PORT
+    PORTS = list(INIT_PORTS)
+    MAX_USED_PORT = max(PORTS)  # For picking the next port.
     assert len(PORTS) > 1, "At least 1 master and 1 chain node"
+    print('Setting up initial chain: %s' % INIT_PORTS)
+
+    subprocess.Popen(["pkill", "-9", "redis-server.*"]).wait()
     master = subprocess.Popen([
         "redis/src/redis-server", "--loadmodule", "build/src/libmaster.so",
         "--port",

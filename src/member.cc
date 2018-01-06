@@ -277,6 +277,10 @@ int Put(RedisModuleCtx* ctx,
       LOG_EVERY_N(INFO, 1) << "Done";
       module.sent().insert(sn);
     } else {
+      // TODO(zongheng): this case is incompletely handled, i.e. "failure of a
+      // middle server".  To handle this the Sent list data structure needs to
+      // be extended to include an executable representation of the sent
+      // commands.
       LOG_EVERY_N(INFO, 1) << "Child dead, waiting for master to intervene.";
       LOG_EVERY_N(INFO, 1) << "Redis context error: '"
                            << std::string(module.child()->errstr) << "'.";

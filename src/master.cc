@@ -248,10 +248,11 @@ int MasterRefreshHead_RedisCommand(RedisModuleCtx* ctx,
   }
   // (2).
   members.erase(members.begin());
-  CHECK(members.size() >= 1 && members.size() <= 2)
-      << "Remaining chain members: "
-      << members.size();  // TODO: implement adding a node?
+  CHECK(members.size() >= 1);
   long long unused = -1;
+  // TODO(zongheng): We should really find the first non-faulty member, instead
+  // of blindly trying only 1 member (members[0]); see the handling in
+  // MasterAdd.
   if (members.size() == 1) {
     LOG(INFO) << "SetRole(singleton)";
     SetRole(members[0].context, "singleton", "nil", "nil", "nil", "nil",
@@ -287,12 +288,14 @@ int MasterRefreshTail_RedisCommand(RedisModuleCtx* ctx,
   }
   // (2).
   members.pop_back();
-  CHECK(members.size() >= 1 &&
-        members.size() <= 2);  // TODO: implement adding a node?
+  CHECK(members.size() >= 1);
+  // TODO(zongheng): We should really find the first non-faulty member, instead
+  // of blindly trying only 1 member (members.back()); see the handling in
+  // MasterAdd.
   long long unused = -1;
   if (members.size() == 1) {
     LOG(INFO) << "SetRole(singleton)";
-    SetRole(members[0].context, "singleton", "nil", "nil", "nil", "nil",
+    SetRole(members.back().context, "singleton", "nil", "nil", "nil", "nil",
             &unused);
   } else {
     LOG(INFO) << "SetRole(tail)";
