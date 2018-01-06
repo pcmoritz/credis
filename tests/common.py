@@ -14,6 +14,15 @@ PORTS = list(INIT_PORTS)
 MAX_USED_PORT = max(PORTS)  # For picking the next port.
 
 
+def MakeChain(num_nodes=2):
+    global PORTS
+    assert num_nodes >= 1
+    # 6369 reserved for the master.
+    chain = [6369 + i for i in range(num_nodes + 1)]
+    PORTS = list(chain)
+    return chain
+
+
 def KillNode(index=None, port=None):
     global PORTS
     assert index is not None or port is not None
@@ -60,10 +69,10 @@ def AddNode(master_client, port=None):
     return member, new_port
 
 
-def Start(request=None):
+def Start(request=None, chain=INIT_PORTS):
     global PORTS
     global MAX_USED_PORT
-    PORTS = list(INIT_PORTS)
+    PORTS = list(chain)
     MAX_USED_PORT = max(PORTS)  # For picking the next port.
     assert len(PORTS) > 1, "At least 1 master and 1 chain node"
     print('Setting up initial chain: %s' % INIT_PORTS)

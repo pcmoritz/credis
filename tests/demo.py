@@ -56,7 +56,7 @@ def Put(i):
     for k in range(3):  # Try 3 times.
         try:
             # if k > 0:
-            print('k %d pubsub %s' % (k, ack_pubsub.connection))
+            # print('k %d pubsub %s' % (k, ack_pubsub.connection))
             # NOTE(zongheng): 1e-4 seems insufficient for an ACK to be
             # delivered back.  1e-3 has the issue of triggering a retry, but
             # then receives an ACK for the old sn (an issue clients will need
@@ -95,15 +95,16 @@ def Put(i):
 
 def SeqPut(n, sleep_secs):
     """For i in range(n), sequentially put i->i into redis."""
+    global ack_client
     global ack_pubsub
     global ops_completed
-    _, ack_pubsub = AckClientAndPubsub(ack_client)
+    ack_client, ack_pubsub = AckClientAndPubsub()
     ops_completed.value = 0
 
     latencies = []
     for i in range(n):
         # if i % 50 == 0:
-        print('i = %d' % i)
+        # print('i = %d' % i)
         start = time.time()
         Put(i)  # i -> i
         latencies.append((time.time() - start) * 1e6)  # Microsecs.
@@ -111,8 +112,10 @@ def SeqPut(n, sleep_secs):
         ops_completed.value += 1  # No lock needed.
 
     nums = np.asarray(latencies)
-    print('latency (us): mean %.5f std %.5f num %d' %
-          (np.mean(nums), np.std(nums), len(nums)))
+    print(
+        'throughput %.1f writes/sec; latency (us): mean %.5f std %.5f num %d' %
+        (len(nums) * 1.0 / np.sum(nums) * 1e6, np.mean(nums), np.std(nums),
+         len(nums)))
 
 
 # Asserts that the redis state is exactly {i -> i | i in [0, n)}.
@@ -236,5 +239,28 @@ def test_dead_old_tail_when_adding():
     proc.kill()
 
 
+def BenchCredis(num_nodes, num_ops):
+    common.Start(chain=common.MakeChain(num_nodes))
+    SeqPut(n=num_ops, sleep_secs=0)
+
+    assert ops_completed.value == num_ops
+    Check(ops_completed.value)
+
+
+def BenchVanillaRedis(num_ops):
+    common.Start(chain=common.MakeChain(1))
+    r = AckClient()  # Just use the chain node as a regular redis server.
+
+    start = time.time()
+    for i in range(num_ops):
+        r.execute_command('SET', str(i), str(i))
+    total_secs = time.time() - start
+    print('throughput %.1f writes/sec; latency (us): mean %.5f std ? num %d' %
+          (num_ops * 1.0 / total_secs, total_secs * 1e6 / num_ops, num_ops))
+
+
 if __name__ == '__main__':
-    assert False
+    # BenchVanillaRedis(num_ops=100000)
+    # BenchCredis(num_nodes=1, num_ops=100000)
+    # BenchCredis(num_nodes=2, num_ops=1000000)
+    BenchCredis(num_nodes=3, num_ops=100000)
