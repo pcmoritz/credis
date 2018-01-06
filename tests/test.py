@@ -3,7 +3,7 @@ import time
 import pytest
 
 import redis
-from common import startcredis
+from tests.common import startcredis
 
 
 # This script should be run from within the credis/ directory
