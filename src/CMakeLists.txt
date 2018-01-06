@@ -31,6 +31,7 @@ target_compile_options(master PUBLIC ${REDIS_MODULE_CFLAGS} -fPIC)
 target_link_libraries(master ${REDIS_MODULE_LDFLAGS})
 target_link_libraries(master utils)
 target_link_libraries(master glog::glog)
+target_link_libraries(master ${LevelDB_LIBRARIES})
 
 # member
 add_library(member SHARED member.cc)

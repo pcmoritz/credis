@@ -32,8 +32,8 @@ def KillNode(index=None, port=None):
     print('killing port %d' % port_to_kill)
     subprocess.check_output(
         ["pkill", "-9", "redis-server.*:%s" % port_to_kill])
-    if port is None:
-        del PORTS[index + 1]
+    # if port is None:
+    #     del PORTS[index + 1]
     # else:
     #     del PORTS[PORTS.index(port)]
 
@@ -56,8 +56,8 @@ def AddNode(master_client, port=None):
     time.sleep(0.1)
     print('calling master add, new_port %s' % new_port)
     master_client.execute_command("MASTER.ADD", "127.0.0.1", str(new_port))
-    if port is None:
-        PORTS.append(new_port)
+    # if port is None:
+    #     PORTS.append(new_port)
     return member, new_port
 
 
@@ -79,7 +79,7 @@ def Start(request=None):
             request.addfinalizer(member.kill)
 
 
-@pytest.fixture(scope="session", autouse=True)
+@pytest.fixture(autouse=True)
 def startcredis(request):
     Start(request)
 

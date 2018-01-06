@@ -13,6 +13,7 @@ extern "C" {
 }
 
 #include "glog/logging.h"
+#include "leveldb/db.h"
 
 #include "utils.h"
 
@@ -24,14 +25,20 @@ struct Member {
 
 std::vector<Member> members;
 
-long long SetRole(redisContext* context,
-                  const std::string& role,
-                  const std::string& prev_address,
-                  const std::string& prev_port,
-                  const std::string& next_address,
-                  const std::string& next_port,
-                  long long sn = -1,
-                  long long drop_writes = 0) {
+using Status = leveldb::Status;  // So that it can be easily replaced.
+
+// TODO(zongheng): all callers of SetRole() in this module need to check the
+// return status.
+
+Status SetRole(redisContext* context,
+               const std::string& role,
+               const std::string& prev_address,
+               const std::string& prev_port,
+               const std::string& next_address,
+               const std::string& next_port,
+               long long* sn_result,
+               long long sn = -1,
+               long long drop_writes = 0) {
   const std::string sn_string = std::to_string(sn);
   const std::string drop_writes_string = std::to_string(drop_writes);
   if (!context->err) {
@@ -39,16 +46,20 @@ long long SetRole(redisContext* context,
         context, "MEMBER.SET_ROLE %s %s %s %s %s %s %s", role.c_str(),
         prev_address.c_str(), prev_port.c_str(), next_address.c_str(),
         next_port.c_str(), sn_string.c_str(), drop_writes_string.c_str()));
-    CHECK(reply != NULL);
-    // TODO(zongheng): check error.
+    if (reply == NULL) {
+      LOG(INFO) << "reply is NULL, IO error";
+      LOG(INFO) << "error string: " << std::string(context->errstr);
+      return Status::IOError(context->errstr);
+    }
+
     LOG(INFO) << "Last sequence number is " << reply->integer;
-    const long long sn_result = reply->integer;
+    *sn_result = reply->integer;
     freeReplyObject(reply);
-    return sn_result;
+    return Status::OK();
   } else {
     LOG(INFO) << "ERROR: SetRole() cannot contact remote node, returning -1";
     LOG(INFO) << "error string: " << std::string(context->errstr);
-    return -1;
+    return Status::IOError(context->errstr);
   }
 }
 
@@ -84,39 +95,63 @@ int MasterAdd_RedisCommand(RedisModuleCtx* ctx,
   const std::string address = ReadString(argv[1]);
   const std::string port = ReadString(argv[2]);
 
-  const size_t size = members.size();
+  size_t size = members.size();
   redisContext* context = SyncConnect(address, std::stoi(port));
   if (size == 0) {
     LOG(INFO) << "First node joined.";
     // Fall through.
   } else {
     LOG(INFO) << "New tail node joined.";
-    const Member old_tail = members[size - 1];
-    if (size > 1) {
-      SetRole(old_tail.context, "middle",
-              /*re-use cached prev addr and port*/ "", "",
-              /*next addr and port*/ address, port, /*sn=*/-1,
-              /*drop_writes=*/1);
-    } else {
-      SetRole(old_tail.context, "head",
-              /*prev addr and port*/ "nil", "nil",
-              /*next addr and port*/ address, port, /*sn=*/-1,
-              /*drop_writes=*/1);
+    long long unused = -1;
+
+    // We search for the first non-faulty member, starting from end of chain
+    // towards the beginning.  This member becomes the parent of our new node.
+    Status s;
+    Member found_tail;
+    while (size >= 1) {
+      found_tail = members[size - 1];
+
+      if (size > 1) {
+        s = SetRole(found_tail.context, "middle",
+                    /*re-use cached prev addr and port*/ "", "",
+                    /*next addr and port*/ address, port, &unused, /*sn=*/-1,
+                    /*drop_writes=*/1);
+      } else {
+        s = SetRole(found_tail.context, "head",
+                    /*prev addr and port*/ "nil", "nil",
+                    /*next addr and port*/ address, port, &unused, /*sn=*/-1,
+                    /*drop_writes=*/1);
+      }
+      if (s.ok()) break;
+      LOG(INFO) << "Member " << size - 1
+                << " found dead, removing; err: " << s.ToString();
+      --size;
+      members.pop_back();
     }
-    // TODO(zongheng): below, "reply" needs to be checked.
-    // TODO(pcm): Execute Sent_T requests
-    LOG(INFO) << "Replicating the tail.";
-    redisReply* reply = reinterpret_cast<redisReply*>(
-        redisCommand(old_tail.context, "MEMBER.REPLICATE"));
-    freeReplyObject(reply);
 
-    LOG(INFO) << "Setting new tail.";
-    SetRole(context, "tail", old_tail.address, old_tail.port, "nil", "nil");
+    if (size > 0) {
+      // TODO(zongheng): below, "reply" needs to be checked.
+      // TODO(pcm): Execute Sent_T requests
+      LOG(INFO) << "Replicating the tail.";
+      redisReply* reply = reinterpret_cast<redisReply*>(
+          redisCommand(found_tail.context, "MEMBER.REPLICATE"));
+      freeReplyObject(reply);
 
-    // Let writes flow through.
-    reply = reinterpret_cast<redisReply*>(
-        redisCommand(old_tail.context, "MEMBER.UNBLOCK_WRITES"));
-    freeReplyObject(reply);
+      LOG(INFO) << "Setting new tail.";
+      CHECK(SetRole(context, "tail", found_tail.address, found_tail.port, "nil",
+                    "nil", &unused)
+                .ok());
+
+      // Let writes flow through.
+      reply = reinterpret_cast<redisReply*>(
+          redisCommand(found_tail.context, "MEMBER.UNBLOCK_WRITES"));
+      freeReplyObject(reply);
+
+    } else {
+      LOG(INFO) << "Previous nodes all dead, new node becomes a singleton...";
+      CHECK(SetRole(context, "singleton", "nil", "nil", "nil", "nil", &unused)
+                .ok());
+    }
   }
   Member tail;
   tail.address = address;
@@ -126,62 +161,64 @@ int MasterAdd_RedisCommand(RedisModuleCtx* ctx,
   return RedisModule_ReplyWithNull(ctx);
 }
 
-// Remove a replica from the chain
-// argv[1] is the IP address of the replica to be removed
-// argv[2] is the port of the replica to be removed
-int MasterRemove_RedisCommand(RedisModuleCtx* ctx,
-                              RedisModuleString** argv,
-                              int argc) {
-  if (argc != 3) {
-    return RedisModule_WrongArity(ctx);
-  }
+// // Remove a replica from the chain
+// // argv[1] is the IP address of the replica to be removed
+// // argv[2] is the port of the replica to be removed
+// int MasterRemove_RedisCommand(RedisModuleCtx* ctx,
+//                               RedisModuleString** argv,
+//                               int argc) {
+//   if (argc != 3) {
+//     return RedisModule_WrongArity(ctx);
+//   }
 
-  std::string address = ReadString(argv[1]);
-  std::string port = ReadString(argv[2]);
+//   std::string address = ReadString(argv[1]);
+//   std::string port = ReadString(argv[2]);
 
-  // Find the node to be removed
-  size_t index = 0;
-  do {
-    if (members[index].address == address && members[index].port == port) {
-      break;
-    }
-    index += 1;
-  } while (index < members.size());
+//   // Find the node to be removed
+//   size_t index = 0;
+//   do {
+//     if (members[index].address == address && members[index].port == port) {
+//       break;
+//     }
+//     index += 1;
+//   } while (index < members.size());
 
-  if (index == members.size()) {
-    return RedisModule_ReplyWithError(ctx, "replica not found");
-  }
+//   if (index == members.size()) {
+//     return RedisModule_ReplyWithError(ctx, "replica not found");
+//   }
 
-  members.erase(members.begin() + index);
+//   members.erase(members.begin() + index);
 
-  // Singleton case.
-  if (members.size() == 1) {
-    LOG(INFO) << "1 node left, setting it as SINGLETON.";
-    SetRole(members[0].context, "singleton", "nil", "nil", "nil", "nil");
-    return RedisModule_ReplyWithNull(ctx);
-  }
+//   // Singleton case.
+//   long long sn = -1;
+//   if (members.size() == 1) {
+//     LOG(INFO) << "1 node left, setting it as SINGLETON.";
+//     SetRole(members[0].context, "singleton", "nil", "nil", "nil", "nil",
+//     &sn); return RedisModule_ReplyWithNull(ctx);
+//   }
 
-  // At least 2 nodes left.
-  if (index == members.size() - 1) {
-    LOG(INFO) << "Removed the tail.";
-    SetRole(members[index - 1].context, "tail", "nil", "nil",
-            members[0].address, members[0].port);
-  } else if (index == 0) {
-    LOG(INFO) << "Removed the head.";
-    SetRole(members[0].context, "head", "nil", "nil", members[1].address,
-            members[1].port);
-  } else {
-    // TODO: this case is incompletely handled.  See "Failure of Other Servers"
-    // in the chain rep paper.
-    LOG(INFO) << "Removed the middle node " << index << ".";
-    const long long sn =
-        SetRole(members[index].context, "", members[index - 1].address,
-                members[index - 1].port, "", "");
-    SetRole(members[index - 1].context, "", "", "", members[index].address,
-            members[index].port, sn);
-  }
-  return RedisModule_ReplyWithNull(ctx);
-}
+//   // At least 2 nodes left.
+//   if (index == members.size() - 1) {
+//     LOG(INFO) << "Removed the tail.";
+//     SetRole(members[index - 1].context, "tail", "nil", "nil",
+//             members[0].address, members[0].port, &sn);
+//   } else if (index == 0) {
+//     LOG(INFO) << "Removed the head.";
+//     SetRole(members[0].context, "head", "nil", "nil", members[1].address,
+//             members[1].port, &sn);
+//   } else {
+//     // TODO: this case is incompletely handled.  See "Failure of Other
+//     Servers"
+//     // in the chain rep paper.
+//     LOG(INFO) << "Removed the middle node " << index << ".";
+//     SetRole(members[index].context, "", members[index - 1].address,
+//             members[index - 1].port, "", "", &sn);
+//     long long unused = -1;
+//     SetRole(members[index - 1].context, "", "", "", members[index].address,
+//             members[index].port, &unused, sn);
+//   }
+//   return RedisModule_ReplyWithNull(ctx);
+// }
 
 // MASTER.REFRESH_HEAD: return the current head if non-faulty, otherwise
 // designate the child of the old head as the new head.
@@ -214,13 +251,15 @@ int MasterRefreshHead_RedisCommand(RedisModuleCtx* ctx,
   CHECK(members.size() >= 1 && members.size() <= 2)
       << "Remaining chain members: "
       << members.size();  // TODO: implement adding a node?
+  long long unused = -1;
   if (members.size() == 1) {
     LOG(INFO) << "SetRole(singleton)";
-    SetRole(members[0].context, "singleton", "nil", "nil", "nil", "nil");
+    SetRole(members[0].context, "singleton", "nil", "nil", "nil", "nil",
+            &unused);
   } else {
     LOG(INFO) << "SetRole(head)";
     SetRole(members[0].context, "head", /*prev addr and port*/ "nil", "nil",
-            /*re-use cached next addr and port*/ "", "");
+            /*re-use cached next addr and port*/ "", "", &unused);
   }
   // (3).
   const std::string s = members[0].address + ":" + members[0].port;
@@ -250,14 +289,16 @@ int MasterRefreshTail_RedisCommand(RedisModuleCtx* ctx,
   members.pop_back();
   CHECK(members.size() >= 1 &&
         members.size() <= 2);  // TODO: implement adding a node?
+  long long unused = -1;
   if (members.size() == 1) {
     LOG(INFO) << "SetRole(singleton)";
-    SetRole(members[0].context, "singleton", "nil", "nil", "nil", "nil");
+    SetRole(members[0].context, "singleton", "nil", "nil", "nil", "nil",
+            &unused);
   } else {
     LOG(INFO) << "SetRole(tail)";
     SetRole(members.back().context, "tail",
             /*re-use cached prev addr and port*/ "", "",
-            /*next addr and port*/ "nil", "nil");
+            /*next addr and port*/ "nil", "nil", &unused);
   }
   // (3).
   const std::string s = members.back().address + ":" + members.back().port;
@@ -281,10 +322,11 @@ int RedisModule_OnLoad(RedisModuleCtx* ctx,
                                 "write", 1, 1, 1) == REDISMODULE_ERR) {
     return REDISMODULE_ERR;
   }
-  if (RedisModule_CreateCommand(ctx, "MASTER.REMOVE", MasterRemove_RedisCommand,
-                                "write", 1, 1, 1) == REDISMODULE_ERR) {
-    return REDISMODULE_ERR;
-  }
+  // if (RedisModule_CreateCommand(ctx, "MASTER.REMOVE",
+  // MasterRemove_RedisCommand,
+  //                               "write", 1, 1, 1) == REDISMODULE_ERR) {
+  //   return REDISMODULE_ERR;
+  // }
   if (RedisModule_CreateCommand(ctx, "MASTER.REFRESH_HEAD",
                                 MasterRefreshHead_RedisCommand, "write",
                                 /*firstkey=*/-1, /*lastkey=*/-1,

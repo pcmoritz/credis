@@ -56,7 +56,7 @@ def Put(i):
     for k in range(3):  # Try 3 times.
         try:
             # if k > 0:
-            # print('k %d pubsub %s' % (k, ack_pubsub.connection))
+            print('k %d pubsub %s' % (k, ack_pubsub.connection))
             # NOTE(zongheng): 1e-4 seems insufficient for an ACK to be
             # delivered back.  1e-3 has the issue of triggering a retry, but
             # then receives an ACK for the old sn (an issue clients will need
@@ -93,20 +93,21 @@ def Put(i):
         fails_since_last_success = 0
 
 
-def SeqPut(n):
+def SeqPut(n, sleep_secs):
     """For i in range(n), sequentially put i->i into redis."""
     global ack_pubsub
     global ops_completed
     _, ack_pubsub = AckClientAndPubsub(ack_client)
+    ops_completed.value = 0
 
     latencies = []
     for i in range(n):
         # if i % 50 == 0:
-        #     print('i = %d' % i)
+        print('i = %d' % i)
         start = time.time()
         Put(i)  # i -> i
         latencies.append((time.time() - start) * 1e6)  # Microsecs.
-        time.sleep(0.01)  # Allows time for nodes to be killed.
+        time.sleep(sleep_secs)
         ops_completed.value += 1  # No lock needed.
 
     nums = np.asarray(latencies)
@@ -128,10 +129,10 @@ def test_demo():
     # Launch driver thread.
     time.sleep(0.1)
     n = 1000
-    driver = multiprocessing.Process(target=SeqPut, args=(n, ))
+    sleep_secs = 0.01
+    driver = multiprocessing.Process(target=SeqPut, args=(n, sleep_secs))
     driver.start()
 
-    # TODO(zongheng): AddNode() should always append new port to PORTS?
     # Kill / add.
     new_nodes = []
     time.sleep(0.1)
@@ -151,3 +152,29 @@ def test_demo():
         proc.kill()
 
     print('Total ops %d, completed ops %d' % (n, ops_completed.value))
+
+
+def test_dead_old_tail_when_adding():
+    # We set "sleep_secs" to a higher value.  So "kill tail", "add node" will
+    # be trigered without a refresh request from the driver.  Master will have
+    # the following view of its members:
+    # init: [ live, live ]
+    # kill: [ live, dead ]
+    #    - master not told node 1 is dead
+    # Tests that when adding, the master detects & removes the dead node first.
+
+    # Launch driver thread.
+    time.sleep(0.1)
+    n = 5
+    sleep_secs = 1
+    driver = multiprocessing.Process(target=SeqPut, args=(n, sleep_secs))
+    driver.start()
+
+    time.sleep(0.1)
+    common.KillNode(index=1)
+    proc, _ = common.AddNode(master_client)
+
+    driver.join()
+    proc.kill()
+    assert ops_completed.value == n
+    Check(ops_completed.value)
