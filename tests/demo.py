@@ -127,7 +127,8 @@ def Check(n):
 
 def test_demo():
     # Launch driver thread.
-    time.sleep(0.1)
+    n = 5
+    sleep_secs = 1
     n = 1000
     sleep_secs = 0.01
     driver = multiprocessing.Process(target=SeqPut, args=(n, sleep_secs))
@@ -136,22 +137,48 @@ def test_demo():
     # Kill / add.
     new_nodes = []
     time.sleep(0.1)
-    # time.sleep(0.1)
     common.KillNode(index=1)
     new_nodes.append(common.AddNode(master_client))
-    # new_nodes.append(common.AddNode(master_client))
-    # new_nodes.append(common.AddNode(master_client))
-    # new_nodes.append(common.AddNode(master_client))
+    new_nodes.append(common.AddNode(master_client))
+    new_nodes.append(common.AddNode(master_client))
+    new_nodes.append(common.AddNode(master_client))
     # print("Added new server with port %d" % new_nodes[-1][1])
 
     driver.join()
+
     assert ops_completed.value == n
+    chain = master_client.execute_command('MASTER.GET_CHAIN')
+    assert len(chain) == 2 - 1 + len(new_nodes), 'chain %s' % chain
     Check(ops_completed.value)
 
     for proc, _ in new_nodes:
         proc.kill()
-
     print('Total ops %d, completed ops %d' % (n, ops_completed.value))
+
+
+def test_kaa():
+    """Kill, add, add."""
+    # Launch driver thread.
+    n = 1000
+    sleep_secs = 0.01
+    driver = multiprocessing.Process(target=SeqPut, args=(n, sleep_secs))
+    driver.start()
+
+    new_nodes = []
+    time.sleep(0.1)
+    common.KillNode(index=1)
+    new_nodes.append(common.AddNode(master_client))
+    new_nodes.append(common.AddNode(master_client))
+
+    driver.join()
+
+    assert ops_completed.value == n
+    chain = master_client.execute_command('MASTER.GET_CHAIN')
+    assert len(chain) == 2 - 1 + len(new_nodes), 'chain %s' % chain
+    Check(ops_completed.value)
+
+    for proc, _ in new_nodes:
+        proc.kill()
 
 
 def test_dead_old_tail_when_adding():
@@ -164,7 +191,6 @@ def test_dead_old_tail_when_adding():
     # Tests that when adding, the master detects & removes the dead node first.
 
     # Launch driver thread.
-    time.sleep(0.1)
     n = 5
     sleep_secs = 1
     driver = multiprocessing.Process(target=SeqPut, args=(n, sleep_secs))
@@ -173,8 +199,11 @@ def test_dead_old_tail_when_adding():
     time.sleep(0.1)
     common.KillNode(index=1)
     proc, _ = common.AddNode(master_client)
-
     driver.join()
-    proc.kill()
+
     assert ops_completed.value == n
+    chain = master_client.execute_command('MASTER.GET_CHAIN')
+    assert len(chain) == 2 - 1 + 1, 'chain %s' % chain
     Check(ops_completed.value)
+
+    proc.kill()

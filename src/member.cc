@@ -247,6 +247,7 @@ int Put(RedisModuleCtx* ctx,
     module.sn_to_key()[sn] = k;
     module.record_sn(static_cast<int64_t>(sn));
   }
+  RedisModule_CloseKey(key);
 
   // Protocol.
   const std::string seqnum = std::to_string(sn);
@@ -418,6 +419,33 @@ int MemberPut_RedisCommand(RedisModuleCtx* ctx,
   }
 }
 
+// Put a key.  No propagation.
+// argv[1]: key
+// argv[2]: val
+// argv[3]: sn
+int MemberNoPropPut_RedisCommand(RedisModuleCtx* ctx,
+                                 RedisModuleString** argv,
+                                 int argc) {
+  if (argc != 4) {
+    return RedisModule_WrongArity(ctx);
+  }
+  long long sn = -1;
+  RedisModule_StringToLongLong(argv[3], &sn);
+  CHECK(!module.DropWrites());
+  CHECK(sn >= 0);
+
+  // No propagation: just state maintenance.
+  RedisModuleKey* key = reinterpret_cast<RedisModuleKey*>(
+      RedisModule_OpenKey(ctx, argv[1], REDISMODULE_WRITE));
+  RedisModule_StringSet(key, argv[2]);
+  RedisModule_CloseKey(key);
+
+  module.sn_to_key()[sn] = ReadString(argv[1]);
+  module.record_sn(static_cast<int64_t>(sn));
+
+  return RedisModule_ReplyWithNull(ctx);
+}
+
 // Propagate a put request down the chain
 // argv[1] is the key for the data
 // argv[2] is the data
@@ -462,9 +490,12 @@ int MemberReplicate_RedisCommand(RedisModuleCtx* ctx,
       const char* key_data = reader.key(&key_size);
       const char* value_data = reader.value(&value_size);
       if (!module.child()->err) {
-        const int status =
-            redisAsyncCommand(module.child(), NULL, NULL, "SET %b %b", key_data,
-                              key_size, value_data, value_size);
+        // LOG(INFO) << "Replicating key " << key_data << " val " << value_data
+        //           << " to child";
+        const std::string sn = std::to_string(element.first);
+        const int status = redisAsyncCommand(
+            module.child(), NULL, NULL, "MEMBER.NO_PROP_PUT %b %b %b", key_data,
+            key_size, value_data, value_size, sn.data(), sn.size());
         // TODO(zongheng): check status.
       } else {
         LOG_EVERY_N(INFO, 1) << "Child dead, waiting for master to intervene.";
@@ -729,6 +760,14 @@ int RedisModule_OnLoad(RedisModuleCtx* ctx,
   // TODO(zongheng): This should be renamed: it's only ever called on head.
   if (RedisModule_CreateCommand(ctx, "MEMBER.PUT", MemberPut_RedisCommand,
                                 "write pubsub", 1, 1, 1) == REDISMODULE_ERR) {
+    return REDISMODULE_ERR;
+  }
+
+  // No propagation, no ACK, etc.  This is only used for the node addition code
+  // path, and is not exposed to clients.
+  if (RedisModule_CreateCommand(ctx, "MEMBER.NO_PROP_PUT",
+                                MemberNoPropPut_RedisCommand, "write", 1, 1,
+                                1) == REDISMODULE_ERR) {
     return REDISMODULE_ERR;
   }
 

@@ -306,6 +306,23 @@ int MasterRefreshTail_RedisCommand(RedisModuleCtx* ctx,
   return RedisModule_ReplyWithSimpleString(ctx, s.data());
 }
 
+// Return the current view of the chain.
+int MasterGetChain_RedisCommand(RedisModuleCtx* ctx,
+                                RedisModuleString** argv,
+                                int argc) {
+  REDISMODULE_NOT_USED(argv);
+  if (argc != 1) return RedisModule_WrongArity(ctx);
+
+  RedisModule_ReplyWithArray(ctx, members.size());
+  LOG(INFO) << "GetChain: " << members.size() << " members";
+  for (const auto m : members) {
+    const std::string mstr = m.address + ":" + m.port;
+    LOG(INFO) << mstr;
+    RedisModule_ReplyWithSimpleString(ctx, mstr.c_str());
+  }
+  return REDISMODULE_OK;
+}
+
 extern "C" {
 
 int RedisModule_OnLoad(RedisModuleCtx* ctx,
@@ -335,6 +352,12 @@ int RedisModule_OnLoad(RedisModuleCtx* ctx,
   }
   if (RedisModule_CreateCommand(ctx, "MASTER.REFRESH_TAIL",
                                 MasterRefreshTail_RedisCommand, "write",
+                                /*firstkey=*/-1, /*lastkey=*/-1,
+                                /*keystep=*/0) == REDISMODULE_ERR) {
+    return REDISMODULE_ERR;
+  }
+  if (RedisModule_CreateCommand(ctx, "MASTER.GET_CHAIN",
+                                MasterGetChain_RedisCommand, "readonly",
                                 /*firstkey=*/-1, /*lastkey=*/-1,
                                 /*keystep=*/0) == REDISMODULE_ERR) {
     return REDISMODULE_ERR;
