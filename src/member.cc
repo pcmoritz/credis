@@ -62,12 +62,12 @@ redisAsyncContext* AsyncConnect(const std::string& address, int port) {
   redisAsyncContext* c = redisAsyncConnect(address.c_str(), port);
   if (c == NULL || c->err) {
     if (c) {
-      printf("Connection error: %s\n", c->errstr);
+      LOG(INFO) << "Connection error: " << c->errstr;
       redisAsyncFree(c);
     } else {
-      printf("Connection error: can't allocate redis context\n");
+      LOG(INFO) << "Connection error: can't allocate redis context";
     }
-    exit(1);
+    return NULL;
   }
   redisAsyncSetDisconnectCallback(c, &DisconnectCallback);
   return c;
@@ -128,15 +128,14 @@ class RedisChainModule {
     if (parent_ && !parent_->err) {
       redisAsyncDisconnect(parent_);
     }
+
+    child_ = NULL;
+    parent_ = NULL;
     if (next_address != "nil") {
       child_ = AsyncConnect(next_address, std::stoi(next_port));
-    } else {
-      child_ = NULL;
     }
     if (prev_address != "nil") {
       parent_ = AsyncConnect(prev_address, std::stoi(prev_port));
-    } else {
-      parent_ = NULL;
     }
   }
 
