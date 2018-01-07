@@ -37,10 +37,12 @@ def Put(i):
     global ack_pubsub
     global fails_since_last_success
 
+    i_str = str(i)  # Serialize it once.
     put_issued = False
+
     for k in range(3):  # Try 3 times.
         try:
-            sn = head_client.execute_command("MEMBER.PUT", str(i), str(i))
+            sn = head_client.execute_command("MEMBER.PUT", i_str, i_str)
             put_issued = True
             break
         except redis.exceptions.ConnectionError:
@@ -239,9 +241,21 @@ def test_dead_old_tail_when_adding():
     proc.kill()
 
 
-def BenchCredis(num_nodes, num_ops):
+def BenchCredis(num_nodes, num_ops, num_clients):
     common.Start(chain=common.MakeChain(num_nodes))
-    SeqPut(n=num_ops, sleep_secs=0)
+    time.sleep(0.1)
+
+    # TODO(zongheng): ops_completed needs to be changed
+    assert num_clients == 1
+
+    drivers = []
+    for i in range(num_clients):
+        drivers.append(
+            multiprocessing.Process(target=SeqPut, args=(num_ops, 0)))
+    for driver in drivers:
+        driver.start()
+    for driver in drivers:
+        driver.join()
 
     assert ops_completed.value == num_ops
     Check(ops_completed.value)
@@ -249,11 +263,13 @@ def BenchCredis(num_nodes, num_ops):
 
 def BenchVanillaRedis(num_ops):
     common.Start(chain=common.MakeChain(1))
+    time.sleep(0.1)
     r = AckClient()  # Just use the chain node as a regular redis server.
 
     start = time.time()
     for i in range(num_ops):
-        r.execute_command('SET', str(i), str(i))
+        i_str = str(i)  # Serialize once.
+        r.execute_command('SET', i_str, i_str)
     total_secs = time.time() - start
     print('throughput %.1f writes/sec; latency (us): mean %.5f std ? num %d' %
           (num_ops * 1.0 / total_secs, total_secs * 1e6 / num_ops, num_ops))
@@ -261,6 +277,6 @@ def BenchVanillaRedis(num_ops):
 
 if __name__ == '__main__':
     # BenchVanillaRedis(num_ops=100000)
-    # BenchCredis(num_nodes=1, num_ops=100000)
+    BenchCredis(num_nodes=1, num_ops=500000, num_clients=1)
     # BenchCredis(num_nodes=2, num_ops=1000000)
-    BenchCredis(num_nodes=3, num_ops=100000)
+    # BenchCredis(num_nodes=3, num_ops=100000)
