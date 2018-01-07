@@ -50,4 +50,4 @@ target_link_libraries(member master_client)
 
 # client test
 add_executable(client_test client_test.cc)
-target_link_libraries(client_test client ${CMAKE_SOURCE_DIR}/redis/deps/hiredis/libhiredis.a ${CMAKE_SOURCE_DIR}/redis/src/ae.o ${CMAKE_SOURCE_DIR}/redis/src/zmalloc.o)
+target_link_libraries(client_test glog::glog client ${CMAKE_SOURCE_DIR}/redis/deps/hiredis/libhiredis.a ${CMAKE_SOURCE_DIR}/redis/src/ae.o ${CMAKE_SOURCE_DIR}/redis/src/zmalloc.o)

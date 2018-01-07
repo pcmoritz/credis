@@ -49,13 +49,14 @@ class RedisClient {
   Status AttachToEventLoop(aeEventLoop *loop);
   Status RunAsync(const std::string &command,
                   const std::string &id,
-                  uint8_t *data,
-                  int64_t length,
+                  const char *data,
+                  size_t length,
                   int64_t callback_index);
 
  private:
   redisContext *context_;
   redisAsyncContext *async_context_;
+  redisAsyncContext *read_context_;
 };
 
 #endif  // CREDIS_CLIENT_H_

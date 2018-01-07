@@ -3,12 +3,12 @@
 // This is a global redis callback which will be registered for every
 // asynchronous redis call. It dispatches the appropriate callback
 // that was registered with the RedisCallbackManager.
-void GlobalRedisCallback(void *c, void *r, void *privdata) {
+void GlobalRedisCallback(void* c, void* r, void* privdata) {
   if (r == NULL) {
     return;
   }
   int64_t callback_index = reinterpret_cast<int64_t>(privdata);
-  redisReply *reply = reinterpret_cast<redisReply *>(r);
+  redisReply* reply = reinterpret_cast<redisReply*>(r);
   std::string data = "";
   if (reply->type == REDIS_REPLY_NIL) {
   } else if (reply->type == REDIS_REPLY_STRING) {
@@ -25,13 +25,13 @@ void GlobalRedisCallback(void *c, void *r, void *privdata) {
   RedisCallbackManager::instance().get(callback_index)(data);
 }
 
-int64_t RedisCallbackManager::add(const RedisCallback &function) {
+int64_t RedisCallbackManager::add(const RedisCallback& function) {
   callbacks_.emplace(num_callbacks, std::unique_ptr<RedisCallback>(
                                         new RedisCallback(function)));
   return num_callbacks++;
 }
 
-RedisCallbackManager::RedisCallback &RedisCallbackManager::get(
+RedisCallbackManager::RedisCallback& RedisCallbackManager::get(
     int64_t callback_index) {
   return *callbacks_[callback_index];
 }
@@ -53,7 +53,7 @@ RedisClient::~RedisClient() {
 constexpr int64_t kRedisDBConnectRetries = 50;
 constexpr int64_t kRedisDBWaitMilliseconds = 100;
 
-Status RedisClient::Connect(const std::string &address, int port) {
+Status RedisClient::Connect(const std::string& address, int port) {
   int connection_attempts = 0;
   context_ = redisConnect(address.c_str(), port);
   while (context_ == nullptr || context_->err) {
@@ -73,20 +73,26 @@ Status RedisClient::Connect(const std::string &address, int port) {
     context_ = redisConnect(address.c_str(), port);
     connection_attempts += 1;
   }
-  redisReply *reply = reinterpret_cast<redisReply *>(
+  redisReply* reply = reinterpret_cast<redisReply*>(
       redisCommand(context_, "CONFIG SET notify-keyspace-events Kl"));
   REDIS_CHECK_ERROR(context_, reply);
 
   // Connect to async context
   async_context_ = redisAsyncConnect(address.c_str(), port);
   if (async_context_ == nullptr || async_context_->err) {
-    LOG(ERROR) << "Could not establish connection to redis " << address
-               << ":" << port;
+    LOG(ERROR) << "Could not establish connection to redis " << address << ":"
+               << port;
   }
+  read_context_ = redisAsyncConnect(address.c_str(), port);
+  if (read_context_ == nullptr || read_context_->err) {
+    LOG(ERROR) << "Could not establish connection to redis " << address << ":"
+               << port;
+  }
+
   return Status::OK();
 }
 
-Status RedisClient::AttachToEventLoop(aeEventLoop *loop) {
+Status RedisClient::AttachToEventLoop(aeEventLoop* loop) {
   if (redisAeAttach(loop, async_context_) != REDIS_OK) {
     return Status::IOError("could not attach redis event loop");
   } else {
@@ -94,17 +100,17 @@ Status RedisClient::AttachToEventLoop(aeEventLoop *loop) {
   }
 }
 
-Status RedisClient::RunAsync(const std::string &command,
-                              const std::string &id,
-                              uint8_t *data,
-                              int64_t length,
-                              int64_t callback_index) {
+Status RedisClient::RunAsync(const std::string& command,
+                             const std::string& id,
+                             const char* data,
+                             size_t length,
+                             int64_t callback_index) {
   if (length > 0) {
     std::string redis_command = command + " %b %b";
     int status = redisAsyncCommand(
         async_context_,
-        reinterpret_cast<redisCallbackFn *>(&GlobalRedisCallback),
-        reinterpret_cast<void *>(callback_index), redis_command.c_str(),
+        reinterpret_cast<redisCallbackFn*>(&GlobalRedisCallback),
+        reinterpret_cast<void*>(callback_index), redis_command.c_str(),
         id.data(), id.size(), data, length);
     if (status == REDIS_ERR) {
       return Status::IOError(std::string(async_context_->errstr));
@@ -113,8 +119,8 @@ Status RedisClient::RunAsync(const std::string &command,
     std::string redis_command = command + " %b";
     int status = redisAsyncCommand(
         async_context_,
-        reinterpret_cast<redisCallbackFn *>(&GlobalRedisCallback),
-        reinterpret_cast<void *>(callback_index), redis_command.c_str(),
+        reinterpret_cast<redisCallbackFn*>(&GlobalRedisCallback),
+        reinterpret_cast<void*>(callback_index), redis_command.c_str(),
         id.data(), id.size());
     if (status == REDIS_ERR) {
       return Status::IOError(std::string(async_context_->errstr));
