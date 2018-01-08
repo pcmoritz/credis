@@ -5,6 +5,13 @@
 
 #include "client.h"
 
+// To launch with 2 servers:
+//
+//   pkill -f redis-server; ./setup.sh 2; make -j;
+//   ./src/credis_seqput_bench 2
+//
+// If "2" is omitted in the above, by default 1 server is used.
+
 const int N = 500000;
 int num_completed = 0;
 aeEventLoop* loop = aeCreateEventLoop(64);
@@ -63,9 +70,18 @@ void SeqPutAckCallback(redisAsyncContext* ack_context,  // != write_context.
   CHECK(status == REDIS_OK);
 }
 
-int main() {
+int main(int argc, char** argv) {
+  // Parse.
+  int num_chain_nodes = 1;
+  if (argc > 1) num_chain_nodes = std::stoi(argv[1]);
+  // Set up "write_port" and "ack_port".
+  const int write_port = 6370;
+  const int ack_port = write_port + num_chain_nodes - 1;
+  LOG(INFO) << "num_chain_nodes " << num_chain_nodes << " write_port "
+            << write_port << " ack_port " << ack_port;
+
   RedisClient client;
-  CHECK(client.Connect("127.0.0.1", 6370).ok());
+  CHECK(client.Connect("127.0.0.1", write_port, ack_port).ok());
   CHECK(client.AttachToEventLoop(loop).ok());
   CHECK(client
             .RegisterAckCallback(
@@ -97,8 +113,8 @@ int main() {
       std::chrono::duration_cast<std::chrono::microseconds>(end - start)
           .count();
   LOG(INFO) << "throughput " << N * 1e6 / latency_us
-            << " writes/s, total duration (ms) " << latency_us / 1e3 << ", num "
-            << N;
+            << " writes/s, total duration (ms) " << latency_us / 1e3
+            << ", num_ops " << N << ", num_nodes " << num_chain_nodes;
 
   return 0;
 }

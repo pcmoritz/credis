@@ -45,6 +45,10 @@ class RedisClient {
  public:
   RedisClient() {}
   ~RedisClient();
+  // TODO: this should really be (addr, port) pairs.
+  // Allows using different ports for write and ack.
+  Status Connect(const std::string& address, int write_port, int ack_port);
+  // Use the same port for both write and ack.
   Status Connect(const std::string& address, int port);
   Status AttachToEventLoop(aeEventLoop* loop);
   Status RegisterAckCallback(redisCallbackFn* callback);

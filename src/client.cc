@@ -53,9 +53,11 @@ RedisClient::~RedisClient() {
 constexpr int64_t kRedisDBConnectRetries = 50;
 constexpr int64_t kRedisDBWaitMilliseconds = 100;
 
-Status RedisClient::Connect(const std::string& address, int port) {
+Status RedisClient::Connect(const std::string& address,
+                            int write_port,
+                            int ack_port) {
   int connection_attempts = 0;
-  context_ = redisConnect(address.c_str(), port);
+  context_ = redisConnect(address.c_str(), write_port);
   while (context_ == nullptr || context_->err) {
     if (connection_attempts >= kRedisDBConnectRetries) {
       if (context_ == nullptr) {
@@ -63,14 +65,14 @@ Status RedisClient::Connect(const std::string& address, int port) {
       }
       if (context_->err) {
         LOG(ERROR) << "Could not establish connection to redis " << address
-                   << ":" << port;
+                   << ":" << write_port;
       }
       break;
     }
     LOG(ERROR) << "Failed to connect to Redis, retrying.";
     // Sleep for a little.
     usleep(kRedisDBWaitMilliseconds * 1000);
-    context_ = redisConnect(address.c_str(), port);
+    context_ = redisConnect(address.c_str(), write_port);
     connection_attempts += 1;
   }
   redisReply* reply = reinterpret_cast<redisReply*>(
@@ -78,21 +80,24 @@ Status RedisClient::Connect(const std::string& address, int port) {
   REDIS_CHECK_ERROR(context_, reply);
 
   // Connect to async context
-  async_context_ = redisAsyncConnect(address.c_str(), port);
+  async_context_ = redisAsyncConnect(address.c_str(), write_port);
   if (async_context_ == nullptr || async_context_->err) {
     LOG(ERROR) << "Could not establish connection to redis " << address << ":"
-               << port;
+               << write_port;
     return Status::IOError("ERR");
   }
-  // TODO(zongheng,pcm): for now (singleton chain credis), same port.
-  ack_subscribe_context_ = redisAsyncConnect(address.c_str(), port);
+  ack_subscribe_context_ = redisAsyncConnect(address.c_str(), ack_port);
   if (ack_subscribe_context_ == nullptr || ack_subscribe_context_->err) {
     LOG(ERROR) << "Could not establish connection to redis " << address << ":"
-               << port;
+               << ack_port;
     return Status::IOError("ERR");
   }
 
   return Status::OK();
+}
+
+Status RedisClient::Connect(const std::string& address, int port) {
+  return Connect(address, port, port);
 }
 
 Status RedisClient::AttachToEventLoop(aeEventLoop* loop) {
