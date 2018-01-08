@@ -53,4 +53,12 @@ target_link_libraries(member tcmalloc)
 
 # client test
 add_executable(client_test client_test.cc)
-target_link_libraries(client_test glog::glog client ${CMAKE_SOURCE_DIR}/redis/deps/hiredis/libhiredis.a ${CMAKE_SOURCE_DIR}/redis/src/ae.o ${CMAKE_SOURCE_DIR}/redis/src/zmalloc.o)
+target_link_libraries(client_test glog::glog client
+  ${CMAKE_SOURCE_DIR}/redis/deps/hiredis/libhiredis.a
+  ${CMAKE_SOURCE_DIR}/redis/src/ae.o
+  ${CMAKE_SOURCE_DIR}/redis/src/zmalloc.o)
+add_executable(redis_parput_bench redis_parput_bench.cc)
+target_link_libraries(redis_parput_bench glog::glog client
+  ${CMAKE_SOURCE_DIR}/redis/deps/hiredis/libhiredis.a
+  ${CMAKE_SOURCE_DIR}/redis/src/ae.o
+  ${CMAKE_SOURCE_DIR}/redis/src/zmalloc.o)
