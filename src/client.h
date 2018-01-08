@@ -56,7 +56,7 @@ class RedisClient {
  private:
   redisContext *context_;
   redisAsyncContext *async_context_;
-  redisAsyncContext *read_context_;
+  redisAsyncContext *ack_subscribe_context_;
 };
 
 #endif  // CREDIS_CLIENT_H_

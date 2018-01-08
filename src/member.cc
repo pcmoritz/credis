@@ -251,6 +251,7 @@ int Put(RedisModuleCtx* ctx,
   // Protocol.
   const std::string seqnum = std::to_string(sn);
   if (module.ActAsTail()) {
+    LOG(INFO) << "publishing " << seqnum;
     RedisModuleCallReply* reply =
         RedisModule_Call(ctx, "PUBLISH", "cc", "answers", seqnum.c_str());
     if (RedisModule_CallReplyType(reply) == REDISMODULE_REPLY_ERROR) {
