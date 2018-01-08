@@ -106,10 +106,11 @@ Status RedisClient::AttachToEventLoop(aeEventLoop* loop) {
 }
 // reinterpret_cast<redisCallbackFn *>
 Status RedisClient::RegisterAckCallback(redisCallbackFn* callback) {
-  static const char* kChan = "answers";
-  const int status =
-      redisAsyncCommand(ack_subscribe_context_, callback,
-                        /*privdata=*/NULL, "SUBSCRIBE %s", kChan);
+  // static const char* kChan = "answers";
+  const std::string kChan = "answers";
+  const int status = redisAsyncCommand(ack_subscribe_context_, callback,
+                                       /*privdata=*/NULL, "SUBSCRIBE %b",
+                                       kChan.c_str(), kChan.size());
   if (status == REDIS_ERR) {
     return Status::IOError(std::string(async_context_->errstr));
   }

@@ -1,12 +1,33 @@
 #include <chrono>
+#include <vector>
 
 #include "glog/logging.h"
 
 #include "client.h"
 
 int num_completed = 0;
+using TimePoint = std::chrono::time_point<std::chrono::system_clock>;
+std::vector<TimePoint> time_starts;
+std::vector<float> latencies;
 
-void AckCallback(redisAsyncContext* c, void* r, void* privdata) {
+namespace {
+
+float Sum(const std::vector<float>& xs) {
+  float sum = 0;
+  for (float x : xs) sum += x;
+  return sum;
+}
+
+float Std(const std::vector<float>& xs, float mean) {
+  float c = 0;
+  for (float x : xs) c += (mean - x) * (mean - x);
+  return std::sqrt(c / xs.size());
+}
+
+}  // namespace
+
+void ParallelPutAckCallback(redisAsyncContext* c, void* r, void* privdata) {
+  const TimePoint now = std::chrono::system_clock::now();
   const redisReply* reply = reinterpret_cast<redisReply*>(r);
 
   /* Replies to the SUBSCRIBE command have 3 elements. There are two
@@ -25,6 +46,10 @@ void AckCallback(redisAsyncContext* c, void* r, void* privdata) {
   // CHECK(reply->elements == 3);
   const redisReply* message_type = reply->element[0];
   if (strcmp(message_type->str, "message") == 0) {
+    const int seqnum = std::stoi(reply->element[2]->str);
+    latencies[seqnum] =
+        std::chrono::duration<float, std::micro>(now - time_starts[seqnum])
+            .count();
     ++num_completed;
   } else if (strcmp(message_type->str, "subscribe") == 0) {
   } else {
@@ -37,13 +62,18 @@ int main() {
   RedisClient client;
   client.Connect("127.0.0.1", 6370);
   client.AttachToEventLoop(loop);
-  client.RegisterAckCallback(&AckCallback);
+  client.RegisterAckCallback(&ParallelPutAckCallback);
 
   int num_calls = 0;
   const int N = 500000;
+  // const int N = 5000;
+  time_starts.resize(N);
+  latencies.resize(N);
 
   LOG(INFO) << "starting bench";
-  auto start = std::chrono::steady_clock::now();
+  auto start = std::chrono::system_clock::now();
+
+  // Parallel put: launch N writes together.
   for (int i = 0; i < N; ++i) {
     const int64_t callback_index = RedisCallbackManager::instance().add(
         [loop, &num_calls](const std::string& unused_data) {
@@ -53,22 +83,30 @@ int main() {
           }
         });
     const std::string i_str = std::to_string(i);
+    time_starts[i] = std::chrono::system_clock::now();
     client.RunAsync("MEMBER.PUT", i_str, i_str.data(), i_str.size(),
                     callback_index);
   }
   LOG(INFO) << "starting loop";
   aeMain(loop);
-  auto end = std::chrono::steady_clock::now();
+  LOG(INFO) << "ending loop";
+  auto end = std::chrono::system_clock::now();
   CHECK(num_calls == N);
   CHECK(num_completed == N)
       << "num_completed " << num_completed << " vs N " << N;
 
+  const float latency_sum = Sum(latencies);
+  const float latency_mean = latency_sum / N;
+  const float latency_std = Std(latencies, latency_mean);
+
   const int64_t latency_us =
       std::chrono::duration_cast<std::chrono::microseconds>(end - start)
           .count();
+  LOG(INFO) << "latency_sum " << latency_sum;
   LOG(INFO) << "throughput " << N * 1e6 / latency_us
             << " writes/s, latency (us) " << latency_us * 1.0 / N << ", num "
-            << N;
+            << N << "; mean " << latency_mean << ", std " << latency_std;
 
   aeDeleteEventLoop(loop);
+  return 0;
 }

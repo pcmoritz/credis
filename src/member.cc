@@ -413,6 +413,7 @@ int MemberConnectToMaster_RedisCommand(RedisModuleCtx* ctx,
 int MemberPut_RedisCommand(RedisModuleCtx* ctx,
                            RedisModuleString** argv,
                            int argc) {
+  LOG(INFO) << "MemberPut";
   if (argc != 3) {
     return RedisModule_WrongArity(ctx);
   }
