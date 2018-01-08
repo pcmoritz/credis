@@ -59,6 +59,7 @@ class RedisClient {
                   int64_t callback_index);
 
   // Does not transfer ownership.
+  redisContext* context() const { return context_; };
   redisAsyncContext* async_context() const { return async_context_; };
 
  private:

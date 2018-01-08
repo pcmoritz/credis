@@ -113,6 +113,7 @@ Status RedisClient::AttachToEventLoop(aeEventLoop* loop) {
 Status RedisClient::RegisterAckCallback(redisCallbackFn* callback) {
   // static const char* kChan = "answers";
   const std::string kChan = "answers";
+  LOG(INFO) << getpid() << " subscribing to chan";
   const int status = redisAsyncCommand(ack_subscribe_context_, callback,
                                        /*privdata=*/NULL, "SUBSCRIBE %b",
                                        kChan.c_str(), kChan.size());
