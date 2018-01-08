@@ -251,7 +251,7 @@ int Put(RedisModuleCtx* ctx,
   // Protocol.
   const std::string seqnum = std::to_string(sn);
   if (module.ActAsTail()) {
-    LOG(INFO) << "publishing " << seqnum;
+    // LOG(INFO) << "publishing " << seqnum;
     RedisModuleCallReply* reply =
         RedisModule_Call(ctx, "PUBLISH", "cc", "answers", seqnum.c_str());
     if (RedisModule_CallReplyType(reply) == REDISMODULE_REPLY_ERROR) {
@@ -413,7 +413,7 @@ int MemberConnectToMaster_RedisCommand(RedisModuleCtx* ctx,
 int MemberPut_RedisCommand(RedisModuleCtx* ctx,
                            RedisModuleString** argv,
                            int argc) {
-  LOG(INFO) << "MemberPut";
+  // LOG(INFO) << "MemberPut";
   if (argc != 3) {
     return RedisModule_WrongArity(ctx);
   }

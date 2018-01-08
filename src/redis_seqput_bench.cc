@@ -7,7 +7,7 @@
 
 const int N = 500000;
 int num_completed = 0;
-aeEventLoop* loop = aeCreateEventLoop(1024);
+aeEventLoop* loop = aeCreateEventLoop(64);
 void SeqPutCallback(redisAsyncContext* context, void*, void*) {
   ++num_completed;
   if (num_completed == N) {

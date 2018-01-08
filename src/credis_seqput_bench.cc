@@ -7,9 +7,14 @@
 
 const int N = 500000;
 int num_completed = 0;
-aeEventLoop* loop = aeCreateEventLoop(1024);
+aeEventLoop* loop = aeCreateEventLoop(64);
+redisAsyncContext* write_context = nullptr;
+int init_subscribe_ack = 0;
 
-void SeqPutAckCallback(redisAsyncContext* context, void* r, void* privdata) {
+void SeqPutAckCallback(redisAsyncContext* ack_context,  // != write_context.
+                       void* r,
+                       void* privdata) {
+  // CHECK(write_context != ack_context) << write_context << " " << ack_context;
   /* Replies to the SUBSCRIBE command have 3 elements. There are two
    * possibilities. Either the reply is the initial acknowledgment of the
    * subscribe command, or it is a message. If it is the initial acknowledgment,
@@ -22,38 +27,40 @@ void SeqPutAckCallback(redisAsyncContext* context, void* r, void* privdata) {
    *     - reply->element[1]->str is the name of the channel
    *     - reply->emement[2]->str is the contents of the message.
    */
-  if (r == nullptr) {
-    LOG(INFO) << "null reply received";
+  // if (r == nullptr) {
+  //   LOG(INFO) << "null reply received";
+  //   return;
+  // }
+  const redisReply* reply = reinterpret_cast<redisReply*>(r);
+  // CHECK(reply->type == REDIS_REPLY_ARRAY);
+  // CHECK(reply->elements == 3);
+  const redisReply* message_type = reply->element[0];
+  // LOG(INFO) << message_type->str;
+
+  // NOTE(zongheng): this is a hack.
+  // if (strcmp(message_type->str, "message") == 0) {
+  if (!init_subscribe_ack) {
+    init_subscribe_ack = 1;
     return;
   }
-  const redisReply* reply = reinterpret_cast<redisReply*>(r);
-  CHECK(reply->type == REDIS_REPLY_ARRAY);
-  CHECK(reply->elements == 3);
-  const redisReply* message_type = reply->element[0];
-  LOG(INFO) << message_type->str;
 
-  if (strcmp(message_type->str, "message") == 0) {
-    // const int seqnum = std::stoi(reply->element[2]->str);
-    // latencies[seqnum] =
-    //     std::chrono::duration<float, std::micro>(now - time_starts[seqnum])
-    //         .count();
-    ++num_completed;
-    if (num_completed == N) {
-      aeStop(loop);
-      return;
-    }
+  // const int seqnum = std::stoi(reply->element[2]->str);
+  // latencies[seqnum] =
+  //     std::chrono::duration<float, std::micro>(now - time_starts[seqnum])
+  //         .count();
+  ++num_completed;
+  if (num_completed == N) {
+    aeStop(loop);
+    return;
+  }
 
-    // Launch next pair.
-    LOG(INFO) << "launching i = " << num_completed;
-    const std::string s = std::to_string(num_completed);
-    const int status =
-        redisAsyncCommand(context, /*callback=*/NULL,
-                          /*privdata=*/NULL, "MEMBER.SET %b %b", s.data(),
-                          s.size(), s.data(), s.size());
-    CHECK(status == REDIS_OK);
-    LOG(INFO) << "launched";
-  };
-  LOG(INFO) << "returning from callback";
+  // Launch next pair.
+  // LOG(INFO) << "launching i = " << num_completed;
+  const std::string s = std::to_string(num_completed);
+  const int status = redisAsyncCommand(write_context, /*callback=*/NULL,
+                                       /*privdata=*/NULL, "MEMBER.PUT %b %b",
+                                       s.data(), s.size(), s.data(), s.size());
+  CHECK(status == REDIS_OK);
 }
 
 int main() {
@@ -64,7 +71,7 @@ int main() {
             .RegisterAckCallback(
                 static_cast<redisCallbackFn*>(&SeqPutAckCallback))
             .ok());
-  redisAsyncContext* context = client.async_context();
+  write_context = client.async_context();
 
   LOG(INFO) << "starting bench";
   auto start = std::chrono::system_clock::now();
@@ -72,7 +79,7 @@ int main() {
   // SeqPut.  Start with "0->0", and each callback will launch the next pair.
   const std::string kZeroStr = "0";
   const int status =
-      redisAsyncCommand(context, /*callback=*/NULL,
+      redisAsyncCommand(write_context, /*callback=*/NULL,
                         /*privdata=*/NULL, "MEMBER.PUT %b %b", kZeroStr.data(),
                         kZeroStr.size(), kZeroStr.data(), kZeroStr.size());
   CHECK(status == REDIS_OK);
