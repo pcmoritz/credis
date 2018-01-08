@@ -53,11 +53,6 @@ RedisClient::~RedisClient() {
 constexpr int64_t kRedisDBConnectRetries = 50;
 constexpr int64_t kRedisDBWaitMilliseconds = 100;
 
-void AckCallback(redisAsyncContext* c, void* reply, void* privdata) {
-  CHECK(false);  // This is not called.
-  LOG(INFO) << std::string(reinterpret_cast<redisReply*>(reply)->str);
-}
-
 Status RedisClient::Connect(const std::string& address, int port) {
   int connection_attempts = 0;
   context_ = redisConnect(address.c_str(), port);
@@ -97,13 +92,6 @@ Status RedisClient::Connect(const std::string& address, int port) {
     return Status::IOError("ERR");
   }
 
-  static const char* kChan = "answers";
-  const int status =
-      redisAsyncCommand(ack_subscribe_context_, AckCallback,
-                        /*privdata=*/NULL, "SUBSCRIBE %s", kChan);
-  if (status == REDIS_ERR) {
-    return Status::IOError(std::string(async_context_->errstr));
-  }
   return Status::OK();
 }
 
@@ -113,6 +101,17 @@ Status RedisClient::AttachToEventLoop(aeEventLoop* loop) {
   }
   if (redisAeAttach(loop, ack_subscribe_context_) != REDIS_OK) {
     return Status::IOError("could not attach redis event loop");
+  }
+  return Status::OK();
+}
+// reinterpret_cast<redisCallbackFn *>
+Status RedisClient::RegisterAckCallback(redisCallbackFn* callback) {
+  static const char* kChan = "answers";
+  const int status =
+      redisAsyncCommand(ack_subscribe_context_, callback,
+                        /*privdata=*/NULL, "SUBSCRIBE %s", kChan);
+  if (status == REDIS_ERR) {
+    return Status::IOError(std::string(async_context_->errstr));
   }
   return Status::OK();
 }

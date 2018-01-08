@@ -47,6 +47,7 @@ class RedisClient {
   ~RedisClient();
   Status Connect(const std::string &address, int port);
   Status AttachToEventLoop(aeEventLoop *loop);
+  Status RegisterAckCallback(redisCallbackFn* callback);
   Status RunAsync(const std::string &command,
                   const std::string &id,
                   const char *data,
