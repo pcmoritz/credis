@@ -225,11 +225,13 @@ RedisChainModule module;
 int Put(RedisModuleCtx* ctx,
         RedisModuleString* name,
         RedisModuleString* data,
+        RedisModuleString* client_id,
         long long sn,
         bool is_flush) {
   RedisModuleKey* key = reinterpret_cast<RedisModuleKey*>(
       RedisModule_OpenKey(ctx, name, REDISMODULE_WRITE));
   const std::string k = ReadString(name);
+  const std::string cid = ReadString(client_id);
   // TODO(pcm): error checking
 
   // State maintenance.
@@ -251,9 +253,11 @@ int Put(RedisModuleCtx* ctx,
   // Protocol.
   const std::string seqnum = std::to_string(sn);
   if (module.ActAsTail()) {
-    // LOG(INFO) << "publishing " << seqnum;
+    // LOG(INFO) << "publishing " << seqnum << " to chan " << cid;
+    // RedisModuleCallReply* reply =
+    //     RedisModule_Call(ctx, "PUBLISH", "cc", "answers", seqnum.c_str());
     RedisModuleCallReply* reply =
-        RedisModule_Call(ctx, "PUBLISH", "cc", "answers", seqnum.c_str());
+        RedisModule_Call(ctx, "PUBLISH", "sc", client_id, seqnum.c_str());
     if (RedisModule_CallReplyType(reply) == REDISMODULE_REPLY_ERROR) {
       return RedisModule_ReplyWithCallReply(ctx, reply);
     }
@@ -275,9 +279,9 @@ int Put(RedisModuleCtx* ctx,
     // LOG_EVERY_N(INFO, 999999999) << "Calling MemberPropagate_RedisCommand";
     if (!module.child()->err) {
       const int status = redisAsyncCommand(
-          module.child(), NULL, NULL, "MEMBER.PROPAGATE %b %b %b %s", k.data(),
-          k.size(), v.data(), v.size(), seqnum.data(), seqnum.size(),
-          is_flush ? kStringOne : kStringZero);
+          module.child(), NULL, NULL, "MEMBER.PROPAGATE %b %b %b %s %b",
+          k.data(), k.size(), v.data(), v.size(), seqnum.data(), seqnum.size(),
+          is_flush ? kStringOne : kStringZero, cid.data(), cid.size());
       // TODO(zongheng): check status.
       // LOG_EVERY_N(INFO, 999999999) << "Done";
       // module.sent().insert(sn);
@@ -410,18 +414,20 @@ int MemberConnectToMaster_RedisCommand(RedisModuleCtx* ctx,
 // Put a key. This is only called on the head node by the client.
 // argv[1] is the key for the data
 // argv[2] is the data
+// argv[3] is unique client id
 int MemberPut_RedisCommand(RedisModuleCtx* ctx,
                            RedisModuleString** argv,
                            int argc) {
-  // LOG(INFO) << "MemberPut";
-  if (argc != 3) {
+  if (argc != 4) {
     return RedisModule_WrongArity(ctx);
   }
+  // LOG(INFO) << "MemberPut";
   if (module.ActAsHead()) {
+    // LOG(INFO) << "MemberPut";
     if (!module.DropWrites()) {
       const long long sn = module.inc_sn();
       // LOG(INFO) << "MemberPut, assigning new sn " << sn;
-      return Put(ctx, argv[1], argv[2], sn, /*is_flush=*/false);
+      return Put(ctx, argv[1], argv[2], argv[3], sn, /*is_flush=*/false);
     } else {
       // The store, by contract, is allowed to ignore writes during faults.
       return RedisModule_ReplyWithNull(ctx);
@@ -465,17 +471,19 @@ int MemberNoPropPut_RedisCommand(RedisModuleCtx* ctx,
 // argv[2] is the data
 // argv[3] is the sequence number for this update request
 // argv[4] is a long long, either 0 or 1, indicating "is_flush".
+// argv[5] is unique client id
 int MemberPropagate_RedisCommand(RedisModuleCtx* ctx,
                                  RedisModuleString** argv,
                                  int argc) {
-  if (argc != 5) {
+  if (argc != 6) {
     return RedisModule_WrongArity(ctx);
   }
   if (!module.DropWrites()) {
     long long sn = -1, is_flush = 0;
     RedisModule_StringToLongLong(argv[3], &sn);
     RedisModule_StringToLongLong(argv[4], &is_flush);
-    return Put(ctx, argv[1], argv[2], sn, is_flush == 0 ? false : true);
+    return Put(ctx, argv[1], argv[2], argv[5], sn,
+               is_flush == 0 ? false : true);
   } else {
     // The store, by contract, is allowed to ignore writes during faults.
     return RedisModule_ReplyWithNull(ctx);
@@ -633,8 +641,8 @@ int TailCheckpoint_RedisCommand(RedisModuleCtx* ctx,
 int HeadFlush_RedisCommand(RedisModuleCtx* ctx,
                            RedisModuleString** argv,
                            int argc) {
-  REDISMODULE_NOT_USED(argv);
-  if (argc != 1) {  // No arg needed.
+  if (argc != 2) {
+    // TODO(zongheng): clean this up; argv[1] is the client id.
     return RedisModule_WrongArity(ctx);
   }
   if (!module.ActAsHead()) {
@@ -663,7 +671,7 @@ int HeadFlush_RedisCommand(RedisModuleCtx* ctx,
     CHECK(it != sn_to_key.end());
     RedisModuleString* key =
         RedisModule_CreateString(ctx, it->second.data(), it->second.size());
-    int reply = Put(ctx, key, /*data=*/NULL,
+    int reply = Put(ctx, key, /*data=*/NULL, argv[1],
                     sn_flushed,  // original sn that introduced this key
                     /*is_flush=*/true);
     // TODO(zongheng): probably need to check error.

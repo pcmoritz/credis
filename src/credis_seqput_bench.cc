@@ -26,6 +26,10 @@ redisAsyncContext* write_context = nullptr;
 std::unordered_set<int64_t> assigned_seqnums;
 std::unordered_set<int64_t> acked_seqnums;
 
+// Clients also need UniqueID support.
+// TODO(zongheng): implement this, currently it's pid.
+const std::string client_id = std::to_string(getpid());
+
 // Forward declaration.
 void SeqPutCallback(redisAsyncContext*, void*, void*);
 
@@ -40,8 +44,9 @@ void OnCompleteLaunchNext() {
   // Launch next pair.
   const std::string s = std::to_string(num_completed);
   const int status = redisAsyncCommand(write_context, &SeqPutCallback,
-                                       /*privdata=*/NULL, "MEMBER.PUT %b %b",
-                                       s.data(), s.size(), s.data(), s.size());
+                                       /*privdata=*/NULL, "MEMBER.PUT %b %b %b",
+                                       s.data(), s.size(), s.data(), s.size(),
+                                       client_id.data(), client_id.size());
   CHECK(status == REDIS_OK);
 }
 
@@ -52,6 +57,7 @@ void SeqPutCallback(redisAsyncContext* write_context,  // != ack_context.
                     void*) {
   const redisReply* reply = reinterpret_cast<redisReply*>(r);
   const int64_t assigned_seqnum = reply->integer;
+  // LOG(INFO) << "SeqPutCallback " << assigned_seqnum;
   auto it = acked_seqnums.find(assigned_seqnum);
   if (it != acked_seqnums.end()) {
     acked_seqnums.erase(it);
@@ -84,6 +90,7 @@ void SeqPutAckCallback(redisAsyncContext* ack_context,  // != write_context.
   // if (strcmp(message_type->str, "message") == 0) {
   if (reply->element[2]->str == nullptr) {
     LOG(INFO) << getpid() << " subscribed";
+    LOG(INFO) << getpid() << " chan: " << reply->element[1]->str;
     return;
   }
   const int64_t received_sn = std::stoi(reply->element[2]->str);
@@ -125,8 +132,9 @@ int main(int argc, char** argv) {
   const std::string kZeroStr = "0";
   const int status =
       redisAsyncCommand(write_context, &SeqPutCallback,
-                        /*privdata=*/NULL, "MEMBER.PUT %b %b", kZeroStr.data(),
-                        kZeroStr.size(), kZeroStr.data(), kZeroStr.size());
+                        /*privdata=*/NULL, "MEMBER.PUT %b %b %b",
+                        kZeroStr.data(), kZeroStr.size(), kZeroStr.data(),
+                        kZeroStr.size(), client_id.data(), client_id.size());
   CHECK(status == REDIS_OK);
 
   LOG(INFO) << "start loop";
