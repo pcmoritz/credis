@@ -420,6 +420,7 @@ int MemberPut_RedisCommand(RedisModuleCtx* ctx,
   if (module.ActAsHead()) {
     if (!module.DropWrites()) {
       const long long sn = module.inc_sn();
+      // LOG(INFO) << "MemberPut, assigning new sn " << sn;
       return Put(ctx, argv[1], argv[2], sn, /*is_flush=*/false);
     } else {
       // The store, by contract, is allowed to ignore writes during faults.

@@ -1,4 +1,6 @@
 #include <chrono>
+#include <thread>
+#include <unordered_set>
 #include <vector>
 
 #include "glog/logging.h"
@@ -15,44 +17,54 @@
 const int kMaxRetries = 10;
 int retries_since_last_success = 0;
 
-const int N = 100;
+const int N = 500000;
 int num_completed = 0;
 aeEventLoop* loop = aeCreateEventLoop(64);
 redisAsyncContext* write_context = nullptr;
-redisContext* s_write_context = nullptr;
-int init_subscribe_ack = 0;
 
-// TODO(zongheng): the proper way to implement this, is to supply a callback for
-// redisAsyncCommand to get the seqnum, and in this *ack* callback, ignore any
-// returned seqnum != the recorded one.
+// Client's bookkeeping for seqnums.
+std::unordered_set<int64_t> assigned_seqnums;
+std::unordered_set<int64_t> acked_seqnums;
 
-// Record the seqnum to wait on.
-int curr_seqnum = -1;
+// Forward declaration.
+void SeqPutCallback(redisAsyncContext*, void*, void*);
+
+void OnCompleteLaunchNext() {
+  retries_since_last_success = 0;
+  ++num_completed;
+  if (num_completed == N) {
+    aeStop(loop);
+    return;
+  }
+
+  // Launch next pair.
+  const std::string s = std::to_string(num_completed);
+  const int status = redisAsyncCommand(write_context, &SeqPutCallback,
+                                       /*privdata=*/NULL, "MEMBER.PUT %b %b",
+                                       s.data(), s.size(), s.data(), s.size());
+  CHECK(status == REDIS_OK);
+}
+
+// This callback gets fired whenever the store assigns a seqnum for a Put
+// request.
 void SeqPutCallback(redisAsyncContext* write_context,  // != ack_context.
                     void* r,
                     void*) {
   const redisReply* reply = reinterpret_cast<redisReply*>(r);
-  LOG(INFO) << getpid() << " gets assigned SN " << reply->integer;
-  curr_seqnum = reply->integer;
+  const int64_t assigned_seqnum = reply->integer;
+  auto it = acked_seqnums.find(assigned_seqnum);
+  if (it != acked_seqnums.end()) {
+    acked_seqnums.erase(it);
+    OnCompleteLaunchNext();
+  } else {
+    assigned_seqnums.insert(assigned_seqnum);
+  }
 }
 
-void Put(int i) {
-  const std::string s = std::to_string(i);
-  LOG(INFO) << getpid() << " launching, curr_seqnum " << curr_seqnum;
-  // const int status = redisAsyncCommand(write_context, &SeqPutCallback,
-  //                                      /*privdata=*/NULL, "MEMBER.PUT %b %b",
-  //                                      s.data(), s.size(), s.data(),
-  //                                      s.size());
-  // CHECK(status == REDIS_OK);
-  void* r = redisCommand(s_write_context, "MEMBER.PUT %b %b", s.data(),
-                         s.size(), s.data(), s.size());
-  CHECK(r != nullptr);
-}
-
+// This gets fired whenever an ACK from the store comes back.
 void SeqPutAckCallback(redisAsyncContext* ack_context,  // != write_context.
                        void* r,
                        void* privdata) {
-  // CHECK(write_context != ack_context) << write_context << " " << ack_context;
   /* Replies to the SUBSCRIBE command have 3 elements. There are two
    * possibilities. Either the reply is the initial acknowledgment of the
    * subscribe command, or it is a message. If it is the initial acknowledgment,
@@ -65,74 +77,25 @@ void SeqPutAckCallback(redisAsyncContext* ack_context,  // != write_context.
    *     - reply->element[1]->str is the name of the channel
    *     - reply->emement[2]->str is the contents of the message.
    */
-  // if (r == nullptr) {
-  //   LOG(INFO) << "null reply received";
-  //   return;
-  // }
   const redisReply* reply = reinterpret_cast<redisReply*>(r);
-  // CHECK(reply->type == REDIS_REPLY_ARRAY);
-  // CHECK(reply->elements == 3);
   const redisReply* message_type = reply->element[0];
-  // LOG(INFO) << message_type->str;
 
   // NOTE(zongheng): this is a hack.
   // if (strcmp(message_type->str, "message") == 0) {
-
   if (reply->element[2]->str == nullptr) {
     LOG(INFO) << getpid() << " subscribed";
-    // init_subscribe_ack = 1;
     return;
   }
-  const int received_sn = std::stoi(reply->element[2]->str);
-  LOG(INFO) << getpid() << " received_sn " << received_sn;
+  const int64_t received_sn = std::stoi(reply->element[2]->str);
 
-  // const int seqnum = std::stoi(reply->element[2]->str);
-  // latencies[seqnum] =
-  //     std::chrono::duration<float, std::micro>(now - time_starts[seqnum])
-  //         .count();
-  if (received_sn == curr_seqnum) {
-    retries_since_last_success = 0;
-    ++num_completed;
-    LOG(INFO) << getpid() << " num_completed " << num_completed
-              << ", seqnum in resp: " << reply->element[2]->str;
-    if (num_completed == N) {
-      aeStop(loop);
-      return;
-    }
-
-    // Launch next pair.
-    // LOG(INFO) << "launching i = " << num_completed;
-    const std::string s = std::to_string(num_completed);
-    LOG(INFO) << getpid() << " launching, curr_seqnum " << curr_seqnum;
-    // const int status =
-    //     redisAsyncCommand(write_context, &SeqPutCallback,
-    //                       /*privdata=*/NULL, "MEMBER.PUT %b %b", s.data(),
-    //                       s.size(), s.data(), s.size());
-    // CHECK(status == REDIS_OK);
-    void* r = redisCommand(s_write_context, "MEMBER.PUT %b %b", s.data(),
-                           s.size(), s.data(), s.size());
-    CHECK(r != nullptr);
-  } else {
-    LOG(INFO) << getpid() << " dropping received_sn " << received_sn;
-    // if (received_sn < curr_seqnum) {
-    //   LOG(INFO) << getpid() << " dropping received_sn " << received_sn;
-    //   return;
-    // }
-    // // Otherwise, the store has advanced over us, retry.
-    // ++retries_since_last_success;
-    // CHECK(retries_since_last_success <= kMaxRetries);
-
-    // if (retries_since_last_success == kMaxRetries) {
-    //   LOG(INFO) << getpid() << " Retry " << retries_since_last_success << " i
-    //   "
-    //             << num_completed;
-    //   Put(num_completed);
-    // } else {
-    //   LOG(INFO) << getpid() << " more patience dropping received_sn "
-    //             << received_sn;
-    //   return;
-    // }
+  auto it = assigned_seqnums.find(received_sn);
+  if (it == assigned_seqnums.end()) {
+    acked_seqnums.insert(received_sn);
+    return;
   }
+  // Otherwise, found & act on this ACK.
+  assigned_seqnums.erase(it);
+  OnCompleteLaunchNext();
 }
 
 int main(int argc, char** argv) {
@@ -153,24 +116,18 @@ int main(int argc, char** argv) {
                 static_cast<redisCallbackFn*>(&SeqPutAckCallback))
             .ok());
   write_context = client.async_context();
-  s_write_context = client.context();
 
+  std::this_thread::sleep_for(std::chrono::seconds(1));
   LOG(INFO) << "starting bench";
   auto start = std::chrono::system_clock::now();
 
   // SeqPut.  Start with "0->0", and each callback will launch the next pair.
-  const std::string s = "0";
-  LOG(INFO) << getpid() << " launching, curr_seqnum " << curr_seqnum;
-  // const int status =
-  //     redisAsyncCommand(write_context, &SeqPutCallback,
-  //                       /*privdata=*/NULL, "MEMBER.PUT %b %b",
-  //                       kZeroStr.data(), kZeroStr.size(), kZeroStr.data(),
-  //                       kZeroStr.size());
-  // CHECK(status == REDIS_OK);
-
-  void* r = redisCommand(s_write_context, "MEMBER.PUT %b %b", s.data(),
-                         s.size(), s.data(), s.size());
-  CHECK(r != nullptr);
+  const std::string kZeroStr = "0";
+  const int status =
+      redisAsyncCommand(write_context, &SeqPutCallback,
+                        /*privdata=*/NULL, "MEMBER.PUT %b %b", kZeroStr.data(),
+                        kZeroStr.size(), kZeroStr.data(), kZeroStr.size());
+  CHECK(status == REDIS_OK);
 
   LOG(INFO) << "start loop";
   aeMain(loop);
