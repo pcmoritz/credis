@@ -5,6 +5,9 @@
 
 #include "client.h"
 
+aeEventLoop* loop = aeCreateEventLoop(1024);
+redisAsyncContext* write_context = nullptr;
+const int N = 500000;
 int num_completed = 0;
 using TimePoint = std::chrono::time_point<std::chrono::system_clock>;
 std::vector<TimePoint> time_starts;
@@ -51,6 +54,10 @@ void ParallelPutAckCallback(redisAsyncContext* c, void* r, void* privdata) {
         std::chrono::duration<float, std::micro>(now - time_starts[seqnum])
             .count();
     ++num_completed;
+    if (num_completed == N) {
+      aeStop(loop);
+      return;
+    }
   } else if (strcmp(message_type->str, "subscribe") == 0) {
   } else {
     CHECK(false) << message_type->str;
@@ -58,14 +65,13 @@ void ParallelPutAckCallback(redisAsyncContext* c, void* r, void* privdata) {
 }
 
 int main() {
-  aeEventLoop* loop = aeCreateEventLoop(1024);
   RedisClient client;
   client.Connect("127.0.0.1", 6370);
   client.AttachToEventLoop(loop);
   client.RegisterAckCallback(&ParallelPutAckCallback);
+  write_context = client.async_context();
 
   int num_calls = 0;
-  const int N = 500000;
   // const int N = 5000;
   time_starts.resize(N);
   latencies.resize(N);
@@ -75,23 +81,28 @@ int main() {
 
   // Parallel put: launch N writes together.
   for (int i = 0; i < N; ++i) {
-    const int64_t callback_index = RedisCallbackManager::instance().add(
-        [loop, &num_calls](const std::string& unused_data) {
-          ++num_calls;
-          if (num_calls == N) {
-            aeStop(loop);
-          }
-        });
     const std::string i_str = std::to_string(i);
-    time_starts[i] = std::chrono::system_clock::now();
-    client.RunAsync("MEMBER.PUT", i_str, i_str.data(), i_str.size(),
-                    callback_index);
+    const int status =
+        redisAsyncCommand(write_context, /*callback=*/NULL,
+                          /*privdata=*/NULL, "MEMBER.PUT %b %b", i_str.data(),
+                          i_str.size(), i_str.data(), i_str.size());
+    CHECK(status == REDIS_OK);
+
+    // const int64_t callback_index = RedisCallbackManager::instance().add(
+    //     [loop, &num_calls](const std::string& unused_data) {
+    //       ++num_calls;
+    //       // if (num_calls == N) {
+    //       //   aeStop(loop);
+    //       // }
+    //     });
+    // time_starts[i] = std::chrono::system_clock::now();
+    // client.RunAsync("MEMBER.PUT", i_str, i_str.data(), i_str.size(),
+    //                 callback_index);
   }
   LOG(INFO) << "starting loop";
   aeMain(loop);
   LOG(INFO) << "ending loop";
   auto end = std::chrono::system_clock::now();
-  CHECK(num_calls == N);
   CHECK(num_completed == N)
       << "num_completed " << num_completed << " vs N " << N;
 
