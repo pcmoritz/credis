@@ -7,6 +7,7 @@ find_package(LevelDB REQUIRED)
 include_directories(${LevelDB_INCLUDES})
 
 if(APPLE)
+  # set(REDIS_MODULE_CFLAGS -W -Wall -dynamic -fno-common -g -ggdb -std=c++11 -O2)
   set(REDIS_MODULE_CFLAGS -std=c++11 -g -pg)
   set(REDIS_MODULE_LDFLAGS "-undefined dynamic_lookup")
   set(CMAKE_SHARED_LIBRARY_SUFFIX ".so")
@@ -52,8 +53,8 @@ target_link_libraries(member profiler)
 target_link_libraries(member tcmalloc)
 
 # Benchmarks.
-add_executable(client_test client_test.cc)
-target_link_libraries(client_test glog::glog client
+add_executable(credis_parput_bench credis_parput_bench.cc)
+target_link_libraries(credis_parput_bench glog::glog client
   ${CMAKE_SOURCE_DIR}/redis/deps/hiredis/libhiredis.a
   ${CMAKE_SOURCE_DIR}/redis/src/ae.o
   ${CMAKE_SOURCE_DIR}/redis/src/zmalloc.o)

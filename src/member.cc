@@ -231,7 +231,6 @@ int Put(RedisModuleCtx* ctx,
   RedisModuleKey* key = reinterpret_cast<RedisModuleKey*>(
       RedisModule_OpenKey(ctx, name, REDISMODULE_WRITE));
   const std::string k = ReadString(name);
-  const std::string cid = ReadString(client_id);
   // TODO(pcm): error checking
 
   // State maintenance.
@@ -245,7 +244,7 @@ int Put(RedisModuleCtx* ctx,
     }
   } else {
     RedisModule_StringSet(key, data);
-    // module.sn_to_key()[sn] = k;
+    module.sn_to_key()[sn] = k;
     module.record_sn(static_cast<int64_t>(sn));
   }
   RedisModule_CloseKey(key);
@@ -253,9 +252,6 @@ int Put(RedisModuleCtx* ctx,
   // Protocol.
   const std::string seqnum = std::to_string(sn);
   if (module.ActAsTail()) {
-    // LOG(INFO) << "publishing " << seqnum << " to chan " << cid;
-    // RedisModuleCallReply* reply =
-    //     RedisModule_Call(ctx, "PUBLISH", "cc", "answers", seqnum.c_str());
     RedisModuleCallReply* reply =
         RedisModule_Call(ctx, "PUBLISH", "sc", client_id, seqnum.c_str());
     if (RedisModule_CallReplyType(reply) == REDISMODULE_REPLY_ERROR) {
@@ -266,10 +262,10 @@ int Put(RedisModuleCtx* ctx,
     // throughput.  We should change this into a local func call for 1-node
     // case.
 
-    // reply = RedisModule_Call(ctx, "MEMBER.ACK", "c", seqnum.c_str());
-    // if (RedisModule_CallReplyType(reply) == REDISMODULE_REPLY_ERROR) {
-    //   return RedisModule_ReplyWithCallReply(ctx, reply);
-    // }
+    reply = RedisModule_Call(ctx, "MEMBER.ACK", "c", seqnum.c_str());
+    if (RedisModule_CallReplyType(reply) == REDISMODULE_REPLY_ERROR) {
+      return RedisModule_ReplyWithCallReply(ctx, reply);
+    }
   } else {
     const std::string v = ReadString(data);
     // NOTE: here we do redisAsyncCommand(child, ...).  However, if the child
@@ -278,6 +274,7 @@ int Put(RedisModuleCtx* ctx,
     // testing the "err" field first.
     // LOG_EVERY_N(INFO, 999999999) << "Calling MemberPropagate_RedisCommand";
     if (!module.child()->err) {
+      const std::string cid = ReadString(client_id);
       const int status = redisAsyncCommand(
           module.child(), NULL, NULL, "MEMBER.PROPAGATE %b %b %b %s %b",
           k.data(), k.size(), v.data(), v.size(), seqnum.data(), seqnum.size(),
