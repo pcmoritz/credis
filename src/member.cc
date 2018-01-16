@@ -48,11 +48,11 @@ namespace {
 // timely freed by hiredis.  Otherwise non-deterministic crashes happen on next
 // redisAsyncCommand() call.
 void DisconnectCallback(const redisAsyncContext* c, int status) {
-  LOG_EVERY_N(INFO, 999999999) << "Disconnect status " << status;
-  // Error codes are defined in read.h under hiredis.
-  LOG_EVERY_N(INFO, 999999999) << "c->err " << c->err;
-  LOG_EVERY_N(INFO, 999999999) << "c->errstr " << std::string(c->errstr);
-  LOG_EVERY_N(INFO, 999999999) << "c->c.tcp.port " << c->c.tcp.port;
+  // LOG_EVERY_N(INFO, 999999999) << "Disconnect status " << status;
+  // // Error codes are defined in read.h under hiredis.
+  // LOG_EVERY_N(INFO, 999999999) << "c->err " << c->err;
+  // LOG_EVERY_N(INFO, 999999999) << "c->errstr " << std::string(c->errstr);
+  // LOG_EVERY_N(INFO, 999999999) << "c->c.tcp.port " << c->c.tcp.port;
 
   // "c" will be freed by hiredis.  Quote: "The context object is always freed
   // after the disconnect callback fired."
@@ -176,7 +176,7 @@ class RedisChainModule {
   int64_t inc_sn() {
     CHECK(ActAsHead())
         << "Logical error?: only the head should increment the sn.";
-    LOG_EVERY_N(INFO, 999999999) << "Using sequence number " << sn_ + 1;
+    // LOG_EVERY_N(INFO, 999999999) << "Using sequence number " << sn_ + 1;
     return ++sn_;
   }
   void record_sn(int64_t sn) { sn_ = std::max(sn_, sn); }
@@ -225,6 +225,7 @@ RedisChainModule module;
 int Put(RedisModuleCtx* ctx,
         RedisModuleString* name,
         RedisModuleString* data,
+        RedisModuleString* client_id,
         long long sn,
         bool is_flush) {
   RedisModuleKey* key = reinterpret_cast<RedisModuleKey*>(
@@ -252,10 +253,14 @@ int Put(RedisModuleCtx* ctx,
   const std::string seqnum = std::to_string(sn);
   if (module.ActAsTail()) {
     RedisModuleCallReply* reply =
-        RedisModule_Call(ctx, "PUBLISH", "cc", "answers", seqnum.c_str());
+        RedisModule_Call(ctx, "PUBLISH", "sc", client_id, seqnum.c_str());
     if (RedisModule_CallReplyType(reply) == REDISMODULE_REPLY_ERROR) {
       return RedisModule_ReplyWithCallReply(ctx, reply);
     }
+
+    // TODO(zongheng): in 1-node chain case, commenting this out gives +3%
+    // throughput.  We should change this into a local func call for 1-node
+    // case.
     reply = RedisModule_Call(ctx, "MEMBER.ACK", "c", seqnum.c_str());
     if (RedisModule_CallReplyType(reply) == REDISMODULE_REPLY_ERROR) {
       return RedisModule_ReplyWithCallReply(ctx, reply);
@@ -266,25 +271,26 @@ int Put(RedisModuleCtx* ctx,
     // crashed before the call, this function non-deterministically crashes
     // with, say, a single digit percent chance.  We guard against this by
     // testing the "err" field first.
-    LOG_EVERY_N(INFO, 999999999) << "Calling MemberPropagate_RedisCommand";
+    // LOG_EVERY_N(INFO, 999999999) << "Calling MemberPropagate_RedisCommand";
     if (!module.child()->err) {
+      const std::string cid = ReadString(client_id);
       const int status = redisAsyncCommand(
-          module.child(), NULL, NULL, "MEMBER.PROPAGATE %b %b %b %s", k.data(),
-          k.size(), v.data(), v.size(), seqnum.data(), seqnum.size(),
-          is_flush ? kStringOne : kStringZero);
+          module.child(), NULL, NULL, "MEMBER.PROPAGATE %b %b %b %s %b",
+          k.data(), k.size(), v.data(), v.size(), seqnum.data(), seqnum.size(),
+          is_flush ? kStringOne : kStringZero, cid.data(), cid.size());
       // TODO(zongheng): check status.
-      LOG_EVERY_N(INFO, 999999999) << "Done";
+      // LOG_EVERY_N(INFO, 999999999) << "Done";
       module.sent().insert(sn);
     } else {
       // TODO(zongheng): this case is incompletely handled, i.e. "failure of a
       // middle server".  To handle this the Sent list data structure needs to
       // be extended to include an executable representation of the sent
       // commands.
-      LOG_EVERY_N(INFO, 999999999)
-          << "Child dead, waiting for master to intervene.";
-      LOG_EVERY_N(INFO, 999999999)
-          << "Redis context error: '" << std::string(module.child()->errstr)
-          << "'.";
+      // LOG_EVERY_N(INFO, 999999999)
+      //     << "Child dead, waiting for master to intervene.";
+      // LOG_EVERY_N(INFO, 999999999)
+      //     << "Redis context error: '" << std::string(module.child()->errstr)
+      //     << "'.";
       // TODO(zongheng): is it okay to reply SN to client in this case as well?
     }
   }
@@ -377,10 +383,10 @@ int MemberSetRole_RedisCommand(RedisModuleCtx* ctx,
     }
   }
 
-  LOG_EVERY_N(INFO, 999999999)
-      << "Called SET_ROLE with role " << module.ChainRoleName()
-      << " and addresses " << prev_address << ":" << prev_port << " and "
-      << next_address << ":" << next_port;
+  // LOG_EVERY_N(INFO, 999999999)
+  //     << "Called SET_ROLE with role " << module.ChainRoleName()
+  //     << " and addresses " << prev_address << ":" << prev_port << " and "
+  //     << next_address << ":" << next_port;
 
   RedisModule_ReplyWithLongLong(ctx, module.sn());
   return REDISMODULE_OK;
@@ -404,16 +410,20 @@ int MemberConnectToMaster_RedisCommand(RedisModuleCtx* ctx,
 // Put a key. This is only called on the head node by the client.
 // argv[1] is the key for the data
 // argv[2] is the data
+// argv[3] is unique client id
 int MemberPut_RedisCommand(RedisModuleCtx* ctx,
                            RedisModuleString** argv,
                            int argc) {
-  if (argc != 3) {
+  if (argc != 4) {
     return RedisModule_WrongArity(ctx);
   }
+  // LOG(INFO) << "MemberPut";
   if (module.ActAsHead()) {
+    // LOG(INFO) << "MemberPut";
     if (!module.DropWrites()) {
       const long long sn = module.inc_sn();
-      return Put(ctx, argv[1], argv[2], sn, /*is_flush=*/false);
+      // LOG(INFO) << "MemberPut, assigning new sn " << sn;
+      return Put(ctx, argv[1], argv[2], argv[3], sn, /*is_flush=*/false);
     } else {
       // The store, by contract, is allowed to ignore writes during faults.
       return RedisModule_ReplyWithNull(ctx);
@@ -457,17 +467,19 @@ int MemberNoPropPut_RedisCommand(RedisModuleCtx* ctx,
 // argv[2] is the data
 // argv[3] is the sequence number for this update request
 // argv[4] is a long long, either 0 or 1, indicating "is_flush".
+// argv[5] is unique client id
 int MemberPropagate_RedisCommand(RedisModuleCtx* ctx,
                                  RedisModuleString** argv,
                                  int argc) {
-  if (argc != 5) {
+  if (argc != 6) {
     return RedisModule_WrongArity(ctx);
   }
   if (!module.DropWrites()) {
     long long sn = -1, is_flush = 0;
     RedisModule_StringToLongLong(argv[3], &sn);
     RedisModule_StringToLongLong(argv[4], &is_flush);
-    return Put(ctx, argv[1], argv[2], sn, is_flush == 0 ? false : true);
+    return Put(ctx, argv[1], argv[2], argv[5], sn,
+               is_flush == 0 ? false : true);
   } else {
     // The store, by contract, is allowed to ignore writes during faults.
     return RedisModule_ReplyWithNull(ctx);
@@ -489,7 +501,7 @@ int MemberReplicate_RedisCommand(RedisModuleCtx* ctx,
   }
 
   if (module.child()) {
-    LOG_EVERY_N(INFO, 999999999) << "Called replicate.";
+    // LOG_EVERY_N(INFO, 999999999) << "Called replicate.";
     for (auto element : module.sn_to_key()) {
       KeyReader reader(ctx, element.second);
       size_t key_size, value_size;
@@ -504,14 +516,15 @@ int MemberReplicate_RedisCommand(RedisModuleCtx* ctx,
             key_size, value_data, value_size, sn.data(), sn.size());
         // TODO(zongheng): check status.
       } else {
-        LOG_EVERY_N(INFO, 999999999)
-            << "Child dead, waiting for master to intervene.";
-        LOG_EVERY_N(INFO, 999999999)
-            << "Redis context error: '" << std::string(module.child()->errstr)
-            << "'.";
+        // LOG_EVERY_N(INFO, 999999999)
+        //     << "Child dead, waiting for master to intervene.";
+        // LOG_EVERY_N(INFO, 999999999)
+        //     << "Redis context error: '" <<
+        //     std::string(module.child()->errstr)
+        //     << "'.";
       }
     }
-    LOG_EVERY_N(INFO, 999999999) << "Done replicating.";
+    // LOG_EVERY_N(INFO, 999999999) << "Done replicating.";
   }
   RedisModule_ReplyWithNull(ctx);
   return REDISMODULE_OK;
@@ -527,11 +540,11 @@ int MemberAck_RedisCommand(RedisModuleCtx* ctx,
     return RedisModule_WrongArity(ctx);
   }
   std::string sn = ReadString(argv[1]);
-  LOG_EVERY_N(INFO, 999999999)
-      << "Erasing sequence number " << sn << " from sent list";
+  // LOG_EVERY_N(INFO, 999999999)
+  //     << "Erasing sequence number " << sn << " from sent list";
   module.sent().erase(std::stoi(sn));
   if (module.parent()) {
-    LOG_EVERY_N(INFO, 999999999) << "Propagating the ACK up the chain";
+    // LOG_EVERY_N(INFO, 999999999) << "Propagating the ACK up the chain";
     const int status = redisAsyncCommand(module.parent(), NULL, NULL,
                                          "MEMBER.ACK %b", sn.data(), sn.size());
     // TODO(zongheng): check status.
@@ -619,15 +632,13 @@ int TailCheckpoint_RedisCommand(RedisModuleCtx* ctx,
 // HEAD.FLUSH: incrementally flush checkpointed entries out of memory.
 //
 // TODO(zongheng): this prototype assumes versioning is implemented.
-//
 // Errors out if not called on the head.
+// Args:
+//   argv[1]: client id
 int HeadFlush_RedisCommand(RedisModuleCtx* ctx,
                            RedisModuleString** argv,
                            int argc) {
-  REDISMODULE_NOT_USED(argv);
-  if (argc != 1) {  // No arg needed.
-    return RedisModule_WrongArity(ctx);
-  }
+  if (argc != 2) return RedisModule_WrongArity(ctx);
   if (!module.ActAsHead()) {
     return RedisModule_ReplyWithError(
         ctx, "ERR this command must be called on the head.");
@@ -640,8 +651,8 @@ int HeadFlush_RedisCommand(RedisModuleCtx* ctx,
                        MasterClient::Watermark::kSnCkpt, &sn_ckpt));
   HandleNonOk(ctx, module.Master().GetWatermark(
                        MasterClient::Watermark::kSnFlushed, &sn_flushed));
-  LOG_EVERY_N(INFO, 999999999)
-      << "sn_flushed " << sn_flushed << ", sn_ckpt " << sn_ckpt;
+  // LOG_EVERY_N(INFO, 999999999)
+  // << "sn_flushed " << sn_flushed << ", sn_ckpt " << sn_ckpt;
 
   // TODO(zongheng): is this even correct?  who/when will sn_flushed be changed?
   // someone needs to subscribe to tail notif.
@@ -654,7 +665,7 @@ int HeadFlush_RedisCommand(RedisModuleCtx* ctx,
     CHECK(it != sn_to_key.end());
     RedisModuleString* key =
         RedisModule_CreateString(ctx, it->second.data(), it->second.size());
-    int reply = Put(ctx, key, /*data=*/NULL,
+    int reply = Put(ctx, key, /*data=*/NULL, argv[1],
                     sn_flushed,  // original sn that introduced this key
                     /*is_flush=*/true);
     // TODO(zongheng): probably need to check error.
@@ -679,7 +690,7 @@ int ListCheckpoint_RedisCommand(RedisModuleCtx* ctx,
   Status s = module.OpenCheckpoint(&ckpt);
   HandleNonOk(ctx, s);
   std::unique_ptr<leveldb::DB> ptr(ckpt);  // RAII.
-  LOG_EVERY_N(INFO, 999999999) << "-- LIST.CHECKPOINT:";
+  // LOG_EVERY_N(INFO, 999999999) << "-- LIST.CHECKPOINT:";
   leveldb::Iterator* it = ckpt->NewIterator(leveldb::ReadOptions());
   std::unique_ptr<leveldb::Iterator> iptr(it);  // RAII.
   for (it->SeekToFirst(); it->Valid(); it->Next()) {
@@ -687,10 +698,10 @@ int ListCheckpoint_RedisCommand(RedisModuleCtx* ctx,
       // Let's skip the special header for prettier printing.
       continue;
     }
-    LOG_EVERY_N(INFO, 999999999)
-        << it->key().ToString() << ": " << it->value().ToString();
+    // LOG_EVERY_N(INFO, 999999999)
+    //     << it->key().ToString() << ": " << it->value().ToString();
   }
-  LOG_EVERY_N(INFO, 999999999) << "-- Done.";
+  // LOG_EVERY_N(INFO, 999999999) << "-- Done.";
   HandleNonOk(ctx, it->status());
   return RedisModule_ReplyWithSimpleString(ctx, "OK");
 }

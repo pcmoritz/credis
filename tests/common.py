@@ -56,11 +56,14 @@ def AddNode(master_client, port=None):
         new_port = MAX_USED_PORT + 1
         MAX_USED_PORT += 1
     print('launching redis-server --port %d' % new_port)
-    member = subprocess.Popen([
-        "redis/src/redis-server", "--loadmodule", "build/src/libmember.so",
-        "--port",
-        str(new_port)
-    ])
+    member = subprocess.Popen(
+        [
+            "redis/src/redis-server",
+            "--loadmodule",
+            "build/src/libmember.so",
+            "--port",
+            str(new_port)
+        ],)
     time.sleep(0.1)
     print('calling master add, new_port %s' % new_port)
     master_client.execute_command("MASTER.ADD", "127.0.0.1", str(new_port))
