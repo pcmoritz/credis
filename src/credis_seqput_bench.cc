@@ -14,9 +14,6 @@
 //
 // If "2" is omitted in the above, by default 1 server is used.
 
-const int kMaxRetries = 10;
-int retries_since_last_success = 0;
-
 const int N = 500000;
 int num_completed = 0;
 aeEventLoop* loop = aeCreateEventLoop(64);
@@ -27,14 +24,13 @@ std::unordered_set<int64_t> assigned_seqnums;
 std::unordered_set<int64_t> acked_seqnums;
 
 // Clients also need UniqueID support.
-// TODO(zongheng): implement this, currently it's pid.
+// TODO(zongheng): implement this properly via uuid, currently it's pid.
 const std::string client_id = std::to_string(getpid());
 
 // Forward declaration.
 void SeqPutCallback(redisAsyncContext*, void*, void*);
 
 void OnCompleteLaunchNext() {
-  retries_since_last_success = 0;
   ++num_completed;
   if (num_completed == N) {
     aeStop(loop);

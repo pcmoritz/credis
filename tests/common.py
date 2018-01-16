@@ -1,4 +1,3 @@
-import os
 import subprocess
 import time
 
@@ -59,15 +58,12 @@ def AddNode(master_client, port=None):
     print('launching redis-server --port %d' % new_port)
     member = subprocess.Popen(
         [
-            # "valgrind",
-            # "--tool=callgrind",
             "redis/src/redis-server",
             "--loadmodule",
             "build/src/libmember.so",
             "--port",
             str(new_port)
         ],)
-        # env=dict(os.environ, CPUPROFILE='/tmp/prof.%s' % new_port))
     time.sleep(0.1)
     print('calling master add, new_port %s' % new_port)
     master_client.execute_command("MASTER.ADD", "127.0.0.1", str(new_port))

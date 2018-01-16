@@ -261,7 +261,6 @@ int Put(RedisModuleCtx* ctx,
     // TODO(zongheng): in 1-node chain case, commenting this out gives +3%
     // throughput.  We should change this into a local func call for 1-node
     // case.
-
     reply = RedisModule_Call(ctx, "MEMBER.ACK", "c", seqnum.c_str());
     if (RedisModule_CallReplyType(reply) == REDISMODULE_REPLY_ERROR) {
       return RedisModule_ReplyWithCallReply(ctx, reply);
@@ -281,7 +280,7 @@ int Put(RedisModuleCtx* ctx,
           is_flush ? kStringOne : kStringZero, cid.data(), cid.size());
       // TODO(zongheng): check status.
       // LOG_EVERY_N(INFO, 999999999) << "Done";
-      // module.sent().insert(sn);
+      module.sent().insert(sn);
     } else {
       // TODO(zongheng): this case is incompletely handled, i.e. "failure of a
       // middle server".  To handle this the Sent list data structure needs to
@@ -543,7 +542,7 @@ int MemberAck_RedisCommand(RedisModuleCtx* ctx,
   std::string sn = ReadString(argv[1]);
   // LOG_EVERY_N(INFO, 999999999)
   //     << "Erasing sequence number " << sn << " from sent list";
-  // module.sent().erase(std::stoi(sn));
+  module.sent().erase(std::stoi(sn));
   if (module.parent()) {
     // LOG_EVERY_N(INFO, 999999999) << "Propagating the ACK up the chain";
     const int status = redisAsyncCommand(module.parent(), NULL, NULL,
@@ -633,15 +632,13 @@ int TailCheckpoint_RedisCommand(RedisModuleCtx* ctx,
 // HEAD.FLUSH: incrementally flush checkpointed entries out of memory.
 //
 // TODO(zongheng): this prototype assumes versioning is implemented.
-//
 // Errors out if not called on the head.
+// Args:
+//   argv[1]: client id
 int HeadFlush_RedisCommand(RedisModuleCtx* ctx,
                            RedisModuleString** argv,
                            int argc) {
-  if (argc != 2) {
-    // TODO(zongheng): clean this up; argv[1] is the client id.
-    return RedisModule_WrongArity(ctx);
-  }
+  if (argc != 2) return RedisModule_WrongArity(ctx);
   if (!module.ActAsHead()) {
     return RedisModule_ReplyWithError(
         ctx, "ERR this command must be called on the head.");
